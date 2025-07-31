@@ -16,3 +16,11 @@ func BlockGasCost(b *ethtypes.Block) *big.Int {
 	}
 	return new(big.Int).Set(cost)
 }
+
+func TxDependency(b *ethtypes.Block) [][]uint64 {
+	dependency := GetHeaderExtra(b.Header()).TxDependency
+	if dependency == nil {
+		return nil
+	}
+	return dependency
+}

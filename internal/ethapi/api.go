@@ -1259,6 +1259,9 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 	if headExtra.BlockGasCost != nil {
 		result["blockGasCost"] = (*hexutil.Big)(headExtra.BlockGasCost)
 	}
+	if headExtra.TxDependency != nil {
+		result["txDependency"] = headExtra.TxDependency
+	}
 	if head.BlobGasUsed != nil {
 		result["blobGasUsed"] = hexutil.Uint64(*head.BlobGasUsed)
 	}

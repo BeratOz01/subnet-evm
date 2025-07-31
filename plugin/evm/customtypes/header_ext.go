@@ -36,6 +36,7 @@ func WithHeaderExtra(h *ethtypes.Header, extra *HeaderExtra) *ethtypes.Header {
 // along with the upstream type for compatibility with existing network blocks.
 type HeaderExtra struct {
 	BlockGasCost *big.Int
+	TxDependency [][]uint64
 }
 
 // EncodeRLP RLP encodes the given [ethtypes.Header] and [HeaderExtra] together
@@ -93,6 +94,13 @@ func (h *HeaderExtra) PostCopy(dst *ethtypes.Header) {
 	if h.BlockGasCost != nil {
 		cp.BlockGasCost = new(big.Int).Set(h.BlockGasCost)
 	}
+	if h.TxDependency != nil {
+		cp.TxDependency = make([][]uint64, len(h.TxDependency))
+		for i, deps := range h.TxDependency {
+			cp.TxDependency[i] = make([]uint64, len(deps))
+			copy(cp.TxDependency[i], deps)
+		}
+	}
 	SetHeaderExtra(dst, cp)
 }
 
@@ -142,10 +150,12 @@ func (h *HeaderSerializable) updateToEth(eth *ethtypes.Header) {
 
 func (h *HeaderSerializable) updateFromExtras(extras *HeaderExtra) {
 	h.BlockGasCost = extras.BlockGasCost
+	h.TxDependency = extras.TxDependency
 }
 
 func (h *HeaderSerializable) updateToExtras(extras *HeaderExtra) {
 	extras.BlockGasCost = h.BlockGasCost
+	extras.TxDependency = h.TxDependency
 }
 
 //go:generate go run github.com/fjl/gencodec -type HeaderSerializable -field-override headerMarshaling -out gen_header_serializable_json.go
@@ -177,6 +187,9 @@ type HeaderSerializable struct {
 	// BlockGasCost was added by SubnetEVM and is ignored in legacy
 	// headers.
 	BlockGasCost *big.Int `json:"blockGasCost" rlp:"optional"`
+
+	// TxDependency was added by SubnetEVM and is ignored in legacy headers.
+	TxDependency [][]uint64 `json:"txDependency" rlp:"optional"`
 
 	// BlobGasUsed was added by EIP-4844 and is ignored in legacy headers.
 	BlobGasUsed *uint64 `json:"blobGasUsed" rlp:"optional"`

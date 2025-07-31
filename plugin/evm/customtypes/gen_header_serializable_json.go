@@ -34,6 +34,7 @@ func (h HeaderSerializable) MarshalJSON() ([]byte, error) {
 		Nonce            types.BlockNonce `json:"nonce"`
 		BaseFee          *hexutil.Big     `json:"baseFeePerGas" rlp:"optional"`
 		BlockGasCost     *hexutil.Big     `json:"blockGasCost" rlp:"optional"`
+		TxDependency     [][]uint64       `json:"txDependency" rlp:"optional"`
 		BlobGasUsed      *hexutil.Uint64  `json:"blobGasUsed" rlp:"optional"`
 		ExcessBlobGas    *hexutil.Uint64  `json:"excessBlobGas" rlp:"optional"`
 		ParentBeaconRoot *common.Hash     `json:"parentBeaconBlockRoot" rlp:"optional"`
@@ -57,6 +58,7 @@ func (h HeaderSerializable) MarshalJSON() ([]byte, error) {
 	enc.Nonce = h.Nonce
 	enc.BaseFee = (*hexutil.Big)(h.BaseFee)
 	enc.BlockGasCost = (*hexutil.Big)(h.BlockGasCost)
+	enc.TxDependency = h.TxDependency
 	enc.BlobGasUsed = (*hexutil.Uint64)(h.BlobGasUsed)
 	enc.ExcessBlobGas = (*hexutil.Uint64)(h.ExcessBlobGas)
 	enc.ParentBeaconRoot = h.ParentBeaconRoot
@@ -84,6 +86,7 @@ func (h *HeaderSerializable) UnmarshalJSON(input []byte) error {
 		Nonce            *types.BlockNonce `json:"nonce"`
 		BaseFee          *hexutil.Big      `json:"baseFeePerGas" rlp:"optional"`
 		BlockGasCost     *hexutil.Big      `json:"blockGasCost" rlp:"optional"`
+		TxDependency     [][]uint64        `json:"txDependency" rlp:"optional"`
 		BlobGasUsed      *hexutil.Uint64   `json:"blobGasUsed" rlp:"optional"`
 		ExcessBlobGas    *hexutil.Uint64   `json:"excessBlobGas" rlp:"optional"`
 		ParentBeaconRoot *common.Hash      `json:"parentBeaconBlockRoot" rlp:"optional"`
@@ -155,6 +158,9 @@ func (h *HeaderSerializable) UnmarshalJSON(input []byte) error {
 	}
 	if dec.BlockGasCost != nil {
 		h.BlockGasCost = (*big.Int)(dec.BlockGasCost)
+	}
+	if dec.TxDependency != nil {
+		h.TxDependency = dec.TxDependency
 	}
 	if dec.BlobGasUsed != nil {
 		h.BlobGasUsed = (*uint64)(dec.BlobGasUsed)
