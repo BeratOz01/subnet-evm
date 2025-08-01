@@ -33,19 +33,20 @@ import (
 	"time"
 
 	"github.com/ava-labs/libevm/common"
-	"github.com/ava-labs/libevm/consensus"
 	"github.com/ava-labs/libevm/core/types"
 	"github.com/ava-labs/libevm/core/vm"
 	"github.com/ava-labs/libevm/crypto"
 	"github.com/ava-labs/libevm/log"
 	"github.com/ava-labs/libevm/metrics"
-	"github.com/ava-labs/libevm/params"
 	ethparams "github.com/ava-labs/libevm/params"
+	"github.com/ava-labs/subnet-evm/consensus"
 	"github.com/ava-labs/subnet-evm/core/blockstm"
 	"github.com/ava-labs/subnet-evm/core/state"
+	"github.com/ava-labs/subnet-evm/params"
 	"github.com/ava-labs/subnet-evm/plugin/evm/customtypes"
 )
 
+// TODO: implement configuration for parallel execution
 type ParallelEVMConfig struct {
 	Enable   bool // enable parallel execution
 	NumProcs int  // number of processors to use
@@ -246,8 +247,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		return nil, nil, 0, fmt.Errorf("invalid tx dependencies")
 	}
 
-	start := time.Now()
-
 	// Configure any upgrades that should go into effect during this block.
 	blockContext := NewBlockContext(block.Number(), block.Time())
 	err := ApplyUpgrades(p.config, &parent.Time, blockContext, statedb)
@@ -313,19 +312,36 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		tasks = append(tasks, task)
 	}
 
-	// create a backup state
-	backupState := statedb.Copy()
+	start := time.Now()
 
 	// TODO: configure the number of processors
 	result, err := blockstm.ExecuteParallel(tasks, 5, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	_, weight := result.Deps.LongestPath(*result.Stats)
+	serialWeight := uint64(0)
+	for i := 0; i < len(result.Deps.GetVertices()); i++ {
+		serialWeight += (*result.Stats)[i].End - (*result.Stats)[i].Start
+	}
+	log.Info("Parallel execution weight", "weight", weight, "serialWeight", serialWeight)
+	parallelizability := time.Duration(serialWeight * 100 / weight)
+	log.Info("Parallel execution parallelizability", "parallelizability", parallelizability)
+	parallelizabilityTimer.Update(parallelizability)
 
 	duration := time.Since(start)
-	log.Info("Task creation completed",
+	log.Info("Parallel execution completed",
 		"duration", duration,
 		"task_count", len(tasks),
-		"avg_time_per_tx", duration/time.Duration(len(tasks)))
+		"avg_time_per_tx", duration/time.Duration(len(tasks)),
+		"receipts", len(receipts))
 
-	// TODO: Implement parallel execution using the tasks
+	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
+	if err = p.engine.Finalize(p.bc, block, parent, statedb, receipts); err != nil {
+		return nil, nil, 0, fmt.Errorf("engine finalization check failed: %w", err)
+	}
+
 	return receipts, allLogs, *usedGas, nil
 }
 
