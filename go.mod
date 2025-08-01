@@ -182,4 +182,4 @@ require (
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )
 
-replace github.com/ava-labs/libevm => /Users/mehmetberatozturk/Documents/payment-network/libevm
+replace github.com/ava-labs/libevm => github.com/BeratOz01/libevm v0.0.1
