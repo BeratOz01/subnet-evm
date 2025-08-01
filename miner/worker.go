@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -49,9 +50,11 @@ import (
 	"github.com/ava-labs/subnet-evm/consensus"
 	"github.com/ava-labs/subnet-evm/consensus/misc/eip4844"
 	"github.com/ava-labs/subnet-evm/core"
+	"github.com/ava-labs/subnet-evm/core/blockstm"
 	"github.com/ava-labs/subnet-evm/core/state"
 	"github.com/ava-labs/subnet-evm/core/txpool"
 	"github.com/ava-labs/subnet-evm/params"
+	"github.com/ava-labs/subnet-evm/plugin/evm/customtypes"
 	customheader "github.com/ava-labs/subnet-evm/plugin/evm/header"
 	"github.com/ava-labs/subnet-evm/precompile/precompileconfig"
 	"github.com/ava-labs/subnet-evm/predicate"
@@ -86,6 +89,19 @@ type environment struct {
 	predicateResults *predicate.Results
 
 	start time.Time // Time that block building began
+
+	// block-stm related fields
+	depsMVFullWriteList [][]blockstm.WriteOperation
+	mvReadMapList       []map[blockstm.STMKey]blockstm.ReadOperation
+}
+
+func (env *environment) addDependency(writeList []blockstm.WriteOperation, readMap map[blockstm.STMKey]blockstm.ReadOperation) {
+	env.depsMVFullWriteList = append(env.depsMVFullWriteList, writeList)
+	env.mvReadMapList = append(env.mvReadMapList, readMap)
+}
+
+func (env *environment) getDependencies() ([][]blockstm.WriteOperation, []map[blockstm.STMKey]blockstm.ReadOperation) {
+	return env.depsMVFullWriteList, env.mvReadMapList
 }
 
 // worker is the main object which takes care of submitting new work to consensus engine
@@ -290,16 +306,18 @@ func (w *worker) createCurrentEnvironment(predicateContext *precompileconfig.Pre
 	numPrefetchers := w.chain.CacheConfig().TriePrefetcherParallelism
 	currentState.StartPrefetcher("miner", state.WithConcurrentWorkers(numPrefetchers))
 	return &environment{
-		signer:           types.MakeSigner(w.chainConfig, header.Number, header.Time),
-		state:            currentState,
-		parent:           parent,
-		header:           header,
-		tcount:           0,
-		gasPool:          new(core.GasPool).AddGas(capacity),
-		rules:            w.chainConfig.Rules(header.Number, params.IsMergeTODO, header.Time),
-		predicateContext: predicateContext,
-		predicateResults: predicate.NewResults(),
-		start:            tstart,
+		signer:              types.MakeSigner(w.chainConfig, header.Number, header.Time),
+		state:               currentState,
+		parent:              parent,
+		header:              header,
+		tcount:              0,
+		gasPool:             new(core.GasPool).AddGas(capacity),
+		rules:               w.chainConfig.Rules(header.Number, params.IsMergeTODO, header.Time),
+		predicateContext:    predicateContext,
+		predicateResults:    predicate.NewResults(),
+		start:               tstart,
+		depsMVFullWriteList: make([][]blockstm.WriteOperation, 0),
+		mvReadMapList:       make([]map[blockstm.STMKey]blockstm.ReadOperation, 0),
 	}, nil
 }
 
@@ -376,7 +394,28 @@ func (w *worker) applyTransaction(env *environment, tx *types.Transaction, coinb
 }
 
 func (w *worker) commitTransactions(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, coinbase common.Address) {
+	deps := map[int]map[int]bool{}
+	chDependency := make(chan blockstm.TransactionDependency)
+	var depsWg sync.WaitGroup
+	var once sync.Once
+
+	defer once.Do(func() {
+		close(chDependency)
+	})
+	depsWg.Add(1)
+
+	go func(chDeps chan blockstm.TransactionDependency) {
+		for t := range chDeps {
+			deps = blockstm.UpdateDependencies(deps, t)
+		}
+
+		depsWg.Done()
+	}(chDependency)
+
 	for {
+		// also add empty mvhashmap for every transaction
+		env.state.AddEmptyMVHashMap()
+
 		// If we don't have enough gas for any further transactions then we're done.
 		if env.gasPool.Gas() < ethparams.TxGas {
 			log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", ethparams.TxGas)
@@ -471,13 +510,109 @@ func (w *worker) commitTransactions(env *environment, plainTxs, blobTxs *transac
 			env.tcount++
 			txs.Shift()
 
+			env.addDependency(env.state.MVFullWriteList(), env.state.MVReadMap())
+			if env.tcount > len(env.depsMVFullWriteList) {
+				log.Warn("MVFullWriteList and MVReadMapList are not the same length", "tcount", env.tcount, "depsMVFullWriteList", len(env.depsMVFullWriteList), "mvReadMapList", len(env.mvReadMapList))
+			}
+
+			log.Info("=== DEPENDENCY TRACKING DEBUG ===",
+				"tcount", env.tcount,
+				"tx_hash", ltx.Hash,
+				"mvReadMapList_size", len(env.mvReadMapList),
+				"depsMVFullWriteList_size", len(env.depsMVFullWriteList))
+
+			depsMVFullWriteList, mvReadMapList := env.getDependencies()
+
+			// Log each transaction's read operations
+			for i, readMap := range mvReadMapList {
+				log.Info("Transaction Read Operations",
+					"tx_index", i,
+					"read_count", len(readMap))
+
+				for key, readOp := range readMap {
+					log.Info("  Read Operation",
+						"tx_index", i,
+						"key", fmt.Sprintf("%x", key),
+						"kind", readOp.Kind, // 0=ReadFromMVHashMap, 1=ReadFromState
+						"version_tx", readOp.Version.TransactionIndex,
+						"version_incarnation", readOp.Version.Incarnation)
+				}
+			}
+
+			for i, writeList := range depsMVFullWriteList {
+				log.Info("Transaction Write Operations",
+					"tx_index", i,
+					"write_count", len(writeList))
+
+				for j, writeOp := range writeList {
+					log.Info("  Write Operation",
+						"tx_index", i,
+						"write_index", j,
+						"key", fmt.Sprintf("%x", writeOp.Path),
+						"version_tx", writeOp.Version.TransactionIndex,
+						"version_incarnation", writeOp.Version.Incarnation)
+				}
+			}
+
+			writeListForDeps, _ := env.getDependencies()
+			tt := blockstm.TransactionDependency{
+				Index:         env.tcount - 1,
+				ReadList:      env.state.MVReadList(),
+				FullWriteList: writeListForDeps,
+			}
+
+			select {
+			case chDependency <- tt:
+			default:
+				log.Warn("Transaction dependency channel is full", "tcount", env.tcount)
+			}
+
 		default:
 			// Transaction is regarded as invalid, drop all consecutive transactions from
 			// the same sender because of `nonce-too-high` clause.
 			log.Debug("Transaction failed, account skipped", "hash", ltx.Hash, "err", err)
 			txs.Pop()
 		}
+
+		// clear the read and write maps for next execution
+		env.state.ClearReadMap()
+		env.state.ClearWriteMap()
 	}
+
+	once.Do(func() {
+		close(chDependency)
+	})
+	depsWg.Wait()
+
+	headerExtra := customtypes.GetHeaderExtra(env.header)
+	if headerExtra == nil {
+		headerExtra = &customtypes.HeaderExtra{}
+	}
+
+	_, mvReadMapList := env.getDependencies()
+
+	if len(mvReadMapList) > 0 {
+		log.Info("setting tx dependencies")
+		tempDeps := make([][]uint64, len(mvReadMapList))
+
+		for i := range mvReadMapList {
+			if depsForTx, exists := deps[i]; exists {
+				tempDeps[i] = make([]uint64, 0, len(depsForTx))
+				for j := range depsForTx {
+					tempDeps[i] = append(tempDeps[i], uint64(j))
+				}
+
+				sort.Slice(tempDeps[i], func(j, k int) bool {
+					return tempDeps[i][j] < tempDeps[i][k]
+				})
+			}
+		}
+
+		headerExtra.TxDependency = tempDeps
+	}
+
+	// set custom header
+	customtypes.SetHeaderExtra(env.header, headerExtra)
 }
 
 // commit runs any post-transaction state modifications, assembles the final block

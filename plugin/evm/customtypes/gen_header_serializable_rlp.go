@@ -2,8 +2,11 @@
 
 package customtypes
 
-import "github.com/ava-labs/libevm/rlp"
-import "io"
+import (
+	"io"
+
+	"github.com/ava-labs/libevm/rlp"
+)
 
 func (obj *HeaderSerializable) EncodeRLP(_w io.Writer) error {
 	w := rlp.NewEncoderBuffer(_w)
@@ -39,10 +42,11 @@ func (obj *HeaderSerializable) EncodeRLP(_w io.Writer) error {
 	w.WriteBytes(obj.Nonce[:])
 	_tmp1 := obj.BaseFee != nil
 	_tmp2 := obj.BlockGasCost != nil
-	_tmp3 := obj.BlobGasUsed != nil
-	_tmp4 := obj.ExcessBlobGas != nil
-	_tmp5 := obj.ParentBeaconRoot != nil
-	if _tmp1 || _tmp2 || _tmp3 || _tmp4 || _tmp5 {
+	_tmp3 := len(obj.TxDependency) > 0
+	_tmp4 := obj.BlobGasUsed != nil
+	_tmp5 := obj.ExcessBlobGas != nil
+	_tmp6 := obj.ParentBeaconRoot != nil
+	if _tmp1 || _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 {
 		if obj.BaseFee == nil {
 			w.Write(rlp.EmptyString)
 		} else {
@@ -52,7 +56,7 @@ func (obj *HeaderSerializable) EncodeRLP(_w io.Writer) error {
 			w.WriteBigInt(obj.BaseFee)
 		}
 	}
-	if _tmp2 || _tmp3 || _tmp4 || _tmp5 {
+	if _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 {
 		if obj.BlockGasCost == nil {
 			w.Write(rlp.EmptyString)
 		} else {
@@ -62,21 +66,32 @@ func (obj *HeaderSerializable) EncodeRLP(_w io.Writer) error {
 			w.WriteBigInt(obj.BlockGasCost)
 		}
 	}
-	if _tmp3 || _tmp4 || _tmp5 {
+	if _tmp3 || _tmp4 || _tmp5 || _tmp6 {
+		_tmp7 := w.List()
+		for _, _tmp8 := range obj.TxDependency {
+			_tmp9 := w.List()
+			for _, _tmp10 := range _tmp8 {
+				w.WriteUint64(_tmp10)
+			}
+			w.ListEnd(_tmp9)
+		}
+		w.ListEnd(_tmp7)
+	}
+	if _tmp4 || _tmp5 || _tmp6 {
 		if obj.BlobGasUsed == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.BlobGasUsed))
 		}
 	}
-	if _tmp4 || _tmp5 {
+	if _tmp5 || _tmp6 {
 		if obj.ExcessBlobGas == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.ExcessBlobGas))
 		}
 	}
-	if _tmp5 {
+	if _tmp6 {
 		if obj.ParentBeaconRoot == nil {
 			w.Write([]byte{0x80})
 		} else {

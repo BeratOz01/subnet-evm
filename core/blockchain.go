@@ -517,6 +517,23 @@ func NewBlockChain(
 	return bc, nil
 }
 
+// NewParallelBlockChain returns a fully initialised block chain using information
+// available in the database. It initialises the default Ethereum Validator and
+// Parallel State Processor.
+func NewParallelBlockChain(
+	db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis, engine consensus.Engine,
+	vmConfig vm.Config, lastAcceptedHash common.Hash, skipChainConfigCheckCompatible bool,
+) (*BlockChain, error) {
+	bc, err := NewBlockChain(db, cacheConfig, genesis, engine, vmConfig, lastAcceptedHash, skipChainConfigCheckCompatible)
+	if err != nil {
+		return nil, err
+	}
+
+	bc.processor = NewParallelStateProcessor(bc.chainConfig, bc, engine)
+
+	return bc, nil
+}
+
 // writeBlockAcceptedIndices writes any indices that must be persisted for accepted block.
 // This includes the following:
 // - transaction lookup indices
