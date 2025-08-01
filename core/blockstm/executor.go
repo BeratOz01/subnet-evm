@@ -155,9 +155,6 @@ type ParallelExecutor struct {
 	// Time records when the parallel execution starts
 	begin time.Time
 
-	// Enable profiling
-	profile bool
-
 	// Worker wait group
 	workerWg sync.WaitGroup
 }
@@ -258,20 +255,17 @@ func (pe *ParallelExecutor) Prepare() error {
 				pe.resultsQueue.Push(result.version.TransactionIndex, result)
 				pe.chResults <- struct{}{}
 
-				// if profiling is enabled, record the execution stats
-				if pe.profile {
-					endTime := time.Since(pe.begin)
+				endTime := time.Since(pe.begin)
 
-					pe.statusMu.Lock()
-					pe.stats[result.version.TransactionIndex] = ExecutionStat{
-						TransactionIndex: result.version.TransactionIndex,
-						Incarnation:      result.version.Incarnation,
-						Start:            uint64(startTime),
-						End:              uint64(endTime),
-						Worker:           workerID,
-					}
-					pe.statusMu.Unlock()
+				pe.statusMu.Lock()
+				pe.stats[result.version.TransactionIndex] = ExecutionStat{
+					TransactionIndex: result.version.TransactionIndex,
+					Incarnation:      result.version.Incarnation,
+					Start:            uint64(startTime),
+					End:              uint64(endTime),
+					Worker:           workerID,
 				}
+				pe.statusMu.Unlock()
 			}
 
 			// means that worker is a speculative worker
@@ -491,10 +485,8 @@ func (pe *ParallelExecutor) Step(res *ExecutionResult) (result ParallelExecution
 		var allDeps map[int]map[int]bool
 		var deps DAG
 
-		if pe.profile {
-			allDeps = GetBlockDependencies(*pe.lastTxIO)
-			deps = BuildDAG(*pe.lastTxIO)
-		}
+		allDeps = GetBlockDependencies(*pe.lastTxIO)
+		deps = BuildDAG(*pe.lastTxIO)
 
 		return ParallelExecutionResult{pe.lastTxIO, &pe.stats, &deps, allDeps}, nil
 	}

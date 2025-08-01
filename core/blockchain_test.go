@@ -76,6 +76,24 @@ func createBlockChain(
 	return blockchain, err
 }
 
+func createParallelBlockChain(
+	db ethdb.Database,
+	cacheConfig *CacheConfig,
+	gspec *Genesis,
+	lastAcceptedHash common.Hash,
+) (*BlockChain, error) {
+	// Import the chain. This runs all block validation rules.
+	blockchain, err := NewParallelBlockChain(
+		db,
+		cacheConfig,
+		gspec,
+		dummy.NewCoinbaseFaker(),
+		vm.Config{},
+		lastAcceptedHash,
+		false,
+	)
+	return blockchain, err
+}
 func TestArchiveBlockChain(t *testing.T) {
 	createArchiveBlockChain := func(db ethdb.Database, gspec *Genesis, lastAcceptedHash common.Hash, _ string) (*BlockChain, error) {
 		return createBlockChain(db, archiveConfig, gspec, lastAcceptedHash)

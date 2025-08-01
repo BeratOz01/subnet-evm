@@ -139,7 +139,10 @@ func GetBlockDependencies(dependencies TransactionInputOutput) map[int]map[int]b
 // LongestPath returns the longest path in the DAG and the weight of the path
 // the path is a list of transaction indices in the ascending order
 // the weight is the sum of the execution times of the transactions in the path
-func (d DAG) LongestPath(stats map[int]ExecutionStat) ([]int, uint64) {
+func (d *DAG) LongestPath(stats map[int]ExecutionStat) ([]int, uint64) {
+	if d == nil || d.DAG == nil {
+		return nil, 0
+	}
 	prev := make(map[int]int, len(d.GetVertices()))
 
 	for i := 0; i < len(d.GetVertices()); i++ {

@@ -242,7 +242,8 @@ func New(
 	if err := eth.precheckPopulateMissingTries(); err != nil {
 		return nil, err
 	}
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, eth.engine, vmConfig, lastAcceptedHash, config.SkipUpgradeCheck)
+	// eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, eth.engine, vmConfig, lastAcceptedHash, config.SkipUpgradeCheck)
+	eth.blockchain, err = core.NewParallelBlockChain(chainDb, cacheConfig, config.Genesis, eth.engine, vmConfig, lastAcceptedHash, config.SkipUpgradeCheck)
 	if err != nil {
 		return nil, err
 	}

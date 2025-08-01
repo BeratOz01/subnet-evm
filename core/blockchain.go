@@ -520,7 +520,7 @@ func NewBlockChain(
 // NewParallelBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Parallel State Processor.
-func NewParallelBlockchain(
+func NewParallelBlockChain(
 	db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis, engine consensus.Engine,
 	vmConfig vm.Config, lastAcceptedHash common.Hash, skipChainConfigCheckCompatible bool,
 ) (*BlockChain, error) {

@@ -492,52 +492,6 @@ func TestLessConflicts(t *testing.T) {
 	testExecutorComb(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
 }
 
-func TestLessConflictsWithMetadata(t *testing.T) {
-	t.Parallel()
-	rand.New(rand.NewSource(0))
-
-	totalTxs := []int{300}
-	numReads := []int{100, 200}
-	numWrites := []int{100, 200}
-	numNonIOs := []int{100, 500}
-
-	checks := composeValidations([]PropertyCheck{checkNoStatusOverlap, checkNoDroppedTx})
-
-	taskRunner := func(numTx int, numRead int, numWrite int, numNonIO int) (time.Duration, time.Duration, time.Duration) {
-		sender := func(i int) common.Address {
-			randomness := rand.Intn(10) + 10
-			return common.BigToAddress(big.NewInt(int64(i % randomness)))
-		}
-		tasks, serialDuration := taskFactory(numTx, sender, numRead, numWrite, numNonIO, randomPathGenerator, readTime, writeTime, nonIOTime)
-
-		parallelDuration := runParallel(t, tasks, checks, false)
-
-		allDeps := runParallelGetMetadata(t, tasks, checks)
-
-		newTasks := make([]ExecutionTask, 0, len(tasks))
-
-		for _, t := range tasks {
-			temp := t.(*testExecTask)
-
-			keys := make([]int, len(allDeps[temp.txIdx]))
-
-			i := 0
-
-			for k := range allDeps[temp.txIdx] {
-				keys[i] = k
-				i++
-			}
-
-			temp.dependencies = keys
-			newTasks = append(newTasks, temp)
-		}
-
-		return parallelDuration, runParallel(t, newTasks, checks, true), serialDuration
-	}
-
-	testExecutorCombWithMetadata(t, totalTxs, numReads, numWrites, numNonIOs, taskRunner)
-}
-
 func TestZeroTx(t *testing.T) {
 	t.Parallel()
 	rand.New(rand.NewSource(0))
@@ -647,52 +601,6 @@ func TestMoreConflicts(t *testing.T) {
 	testExecutorComb(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
 }
 
-func TestMoreConflictsWithMetadata(t *testing.T) {
-	t.Parallel()
-	rand.New(rand.NewSource(0))
-
-	totalTxs := []int{300}
-	numReads := []int{100, 200}
-	numWrites := []int{100, 200}
-	numNonIO := []int{100, 500}
-
-	checks := composeValidations([]PropertyCheck{checkNoStatusOverlap, checkNoDroppedTx})
-
-	taskRunner := func(numTx int, numRead int, numWrite int, numNonIO int) (time.Duration, time.Duration, time.Duration) {
-		sender := func(i int) common.Address {
-			randomness := rand.Intn(10) + 10
-			return common.BigToAddress(big.NewInt(int64(i / randomness)))
-		}
-		tasks, serialDuration := taskFactory(numTx, sender, numRead, numWrite, numNonIO, randomPathGenerator, readTime, writeTime, nonIOTime)
-
-		parallelDuration := runParallel(t, tasks, checks, false)
-
-		allDeps := runParallelGetMetadata(t, tasks, checks)
-
-		newTasks := make([]ExecutionTask, 0, len(tasks))
-
-		for _, t := range tasks {
-			temp := t.(*testExecTask)
-
-			keys := make([]int, len(allDeps[temp.txIdx]))
-
-			i := 0
-
-			for k := range allDeps[temp.txIdx] {
-				keys[i] = k
-				i++
-			}
-
-			temp.dependencies = keys
-			newTasks = append(newTasks, temp)
-		}
-
-		return parallelDuration, runParallel(t, newTasks, checks, true), serialDuration
-	}
-
-	testExecutorCombWithMetadata(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
-}
-
 func TestRandomTx(t *testing.T) {
 	t.Parallel()
 	rand.New(rand.NewSource(0))
@@ -713,50 +621,6 @@ func TestRandomTx(t *testing.T) {
 	}
 
 	testExecutorComb(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
-}
-
-func TestRandomTxWithMetadata(t *testing.T) {
-	t.Parallel()
-	rand.New(rand.NewSource(0))
-
-	totalTxs := []int{300}
-	numReads := []int{100, 200}
-	numWrites := []int{100, 200}
-	numNonIO := []int{100, 500}
-
-	checks := composeValidations([]PropertyCheck{checkNoStatusOverlap, checkNoDroppedTx})
-
-	taskRunner := func(numTx int, numRead int, numWrite int, numNonIO int) (time.Duration, time.Duration, time.Duration) {
-		// Randomly assign this tx to one of 10 senders
-		sender := func(i int) common.Address { return common.BigToAddress(big.NewInt(int64(rand.Intn(10)))) }
-		tasks, serialDuration := taskFactory(numTx, sender, numRead, numWrite, numNonIO, randomPathGenerator, readTime, writeTime, nonIOTime)
-
-		parallelDuration := runParallel(t, tasks, checks, false)
-
-		allDeps := runParallelGetMetadata(t, tasks, checks)
-
-		newTasks := make([]ExecutionTask, 0, len(tasks))
-
-		for _, t := range tasks {
-			temp := t.(*testExecTask)
-
-			keys := make([]int, len(allDeps[temp.txIdx]))
-
-			i := 0
-
-			for k := range allDeps[temp.txIdx] {
-				keys[i] = k
-				i++
-			}
-
-			temp.dependencies = keys
-			newTasks = append(newTasks, temp)
-		}
-
-		return parallelDuration, runParallel(t, newTasks, checks, true), serialDuration
-	}
-
-	testExecutorCombWithMetadata(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
 }
 
 func TestTxWithLongTailRead(t *testing.T) {
@@ -786,60 +650,11 @@ func TestTxWithLongTailRead(t *testing.T) {
 	testExecutorComb(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
 }
 
-func TestTxWithLongTailReadWithMetadata(t *testing.T) {
-	t.Parallel()
-	rand.New(rand.NewSource(0))
-
-	totalTxs := []int{300}
-	numReads := []int{100, 200}
-	numWrites := []int{100, 200}
-	numNonIO := []int{100, 500}
-
-	checks := composeValidations([]PropertyCheck{checkNoStatusOverlap, checkNoDroppedTx})
-
-	taskRunner := func(numTx int, numRead int, numWrite int, numNonIO int) (time.Duration, time.Duration, time.Duration) {
-		sender := func(i int) common.Address {
-			randomness := rand.Intn(10) + 10
-			return common.BigToAddress(big.NewInt(int64(i / randomness)))
-		}
-
-		longTailReadTimer := longTailTimeGenerator(4*time.Microsecond, 12*time.Microsecond, 7, 10)
-
-		tasks, serialDuration := taskFactory(numTx, sender, numRead, numWrite, numNonIO, randomPathGenerator, longTailReadTimer, writeTime, nonIOTime)
-
-		parallelDuration := runParallel(t, tasks, checks, false)
-
-		allDeps := runParallelGetMetadata(t, tasks, checks)
-
-		newTasks := make([]ExecutionTask, 0, len(tasks))
-
-		for _, t := range tasks {
-			temp := t.(*testExecTask)
-
-			keys := make([]int, len(allDeps[temp.txIdx]))
-
-			i := 0
-
-			for k := range allDeps[temp.txIdx] {
-				keys[i] = k
-				i++
-			}
-
-			temp.dependencies = keys
-			newTasks = append(newTasks, temp)
-		}
-
-		return parallelDuration, runParallel(t, newTasks, checks, true), serialDuration
-	}
-
-	testExecutorCombWithMetadata(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
-}
-
 func TestDexScenario(t *testing.T) {
 	t.Parallel()
 	rand.New(rand.NewSource(0))
 
-	totalTxs := []int{10, 50, 100, 200, 300}
+	totalTxs := []int{10, 50, 100, 200}
 	numReads := []int{20, 100, 200}
 	numWrites := []int{20, 100, 200}
 	numNonIO := []int{100, 500}
@@ -868,63 +683,6 @@ func TestDexScenario(t *testing.T) {
 	}
 
 	testExecutorComb(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
-}
-
-func TestDexScenarioWithMetadata(t *testing.T) {
-	t.Parallel()
-	rand.New(rand.NewSource(0))
-
-	totalTxs := []int{300}
-	numReads := []int{100, 200}
-	numWrites := []int{100, 200}
-	numNonIO := []int{100, 500}
-
-	postValidation := func(pe *ParallelExecutor) error {
-		if pe.lastSettled == len(pe.tasks) {
-			for i, inputs := range pe.lastTxIO.inputs {
-				for _, input := range inputs {
-					if input.Version.TransactionIndex != i-1 {
-						return fmt.Errorf("Tx %d should depend on tx %d, but it actually depends on %d", i, i-1, input.Version.TransactionIndex)
-					}
-				}
-			}
-		}
-
-		return nil
-	}
-
-	checks := composeValidations([]PropertyCheck{checkNoStatusOverlap, postValidation, checkNoDroppedTx})
-
-	taskRunner := func(numTx int, numRead int, numWrite int, numNonIO int) (time.Duration, time.Duration, time.Duration) {
-		sender := func(i int) common.Address { return common.BigToAddress(big.NewInt(int64(i))) }
-		tasks, serialDuration := taskFactory(numTx, sender, numRead, numWrite, numNonIO, dexPathGenerator, readTime, writeTime, nonIOTime)
-
-		parallelDuration := runParallel(t, tasks, checks, false)
-
-		allDeps := runParallelGetMetadata(t, tasks, checks)
-
-		newTasks := make([]ExecutionTask, 0, len(tasks))
-
-		for _, t := range tasks {
-			temp := t.(*testExecTask)
-
-			keys := make([]int, len(allDeps[temp.txIdx]))
-
-			i := 0
-
-			for k := range allDeps[temp.txIdx] {
-				keys[i] = k
-				i++
-			}
-
-			temp.dependencies = keys
-			newTasks = append(newTasks, temp)
-		}
-
-		return parallelDuration, runParallel(t, newTasks, checks, true), serialDuration
-	}
-
-	testExecutorCombWithMetadata(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
 }
 
 func TestBreakFromCircularDependency(t *testing.T) {

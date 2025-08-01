@@ -62,7 +62,7 @@ func TestMaxComplete(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, 6, s.completedCount())
+	require.Equal(t, 6, s.lastCompletedTransaction())
 
 	s2 := newTaskStatusManager(10)
 
@@ -75,7 +75,7 @@ func TestMaxComplete(t *testing.T) {
 	}
 	s2.markAsCompleted(2)
 	s2.markAsCompleted(4)
-	require.Equal(t, -1, s2.completedCount())
+	require.Equal(t, -1, s2.lastCompletedTransaction())
 
 	s2.completed = insertToSortedList(s2.completed, 4)
 	require.Equal(t, 2, s2.completedCount())

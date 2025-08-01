@@ -30,6 +30,7 @@ package core
 import (
 	"fmt"
 	"math/big"
+	"sort"
 	"time"
 
 	"github.com/ava-labs/libevm/common"
@@ -107,6 +108,9 @@ type ExecutionTask struct {
 // Execute is the main function that executes the transaction but not settle the tx
 // it is called by the parallel executor
 func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (err error) {
+	now := time.Now()
+	log.Info("[PARALLEL PROCESSOR] Executing transaction", "tx", task.tx.Hash().Hex())
+
 	// copy the clean statedb to the statedb
 	task.statedb = task.cleanStatedb.Copy()
 	task.statedb.SetTxContext(task.tx.Hash(), task.index)
@@ -139,6 +143,8 @@ func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (er
 	// finalize the state in backup state db
 	// will commit all changes to the statedb at the end of the block execution
 	task.statedb.Finalise(task.config.IsEIP158(task.blockNumber))
+	log.Info("[PARALLEL PROCESSOR] Transaction executed", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
+
 	return
 }
 
@@ -168,6 +174,9 @@ func (task *ExecutionTask) Dependencies() []int {
 
 // Settle is the function that settles the transaction
 func (task *ExecutionTask) Settle() {
+	now := time.Now()
+	log.Info("[PARALLEL PROCESSOR] Settling transaction", "tx", task.tx.Hash().Hex())
+
 	// set the tx context to the final statedb
 	task.finalStatedb.SetTxContext(task.tx.Hash(), task.index)
 
@@ -188,12 +197,14 @@ func (task *ExecutionTask) Settle() {
 	}
 
 	// update the state with pending changes
-	var root []byte
-	if task.config.IsByzantium(task.blockNumber) {
-		task.finalStatedb.Finalise(true)
-	} else {
-		root = task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
-	}
+	// var root []byte
+	// if task.config.IsByzantium(task.blockNumber) {
+	// 	task.finalStatedb.Finalise(true)
+	// } else {
+	// 	root = task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
+	// }
+	root := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
+
 	*task.totalUsedGas += task.result.UsedGas
 
 	// Create a new receipt for the transaction, storing the intermediate root and gas used
@@ -226,11 +237,16 @@ func (task *ExecutionTask) Settle() {
 
 	*task.receipts = append(*task.receipts, receipt)
 	*task.allLogs = append(*task.allLogs, task.finalStatedb.Logs()...)
+
+	log.Info("[PARALLEL PROCESSOR] Transaction settled", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
 }
 
 var parallelizabilityTimer = metrics.NewRegisteredTimer("block/parallelizability", nil)
 
 func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Header, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
+	now := time.Now()
+	log.Info("[PARALLEL PROCESSOR] Processing block", "block", block.Hash().Hex())
+
 	var (
 		receipts types.Receipts
 		usedGas  = new(uint64)
@@ -244,6 +260,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 
 	// verify tx dependencies
 	if !verifyDeps(deps) {
+		log.Info("Invalid tx dependencies", "deps", deps)
 		return nil, nil, 0, fmt.Errorf("invalid tx dependencies")
 	}
 
@@ -254,6 +271,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		log.Error("failed to configure precompiles processing block", "hash", block.Hash(), "number", block.NumberU64(), "timestamp", block.Time(), "err", err)
 		return nil, nil, 0, err
 	}
+
+	log.Info("Transaction dependencies fetched successfully", "deps", deps)
 
 	var (
 		context = NewEVMBlockContext(header, p.bc, nil)
@@ -312,23 +331,32 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		tasks = append(tasks, task)
 	}
 
+	log.Info("Tasks created successfully", "tasks", len(tasks))
+
 	start := time.Now()
 
 	// TODO: configure the number of processors
-	result, err := blockstm.ExecuteParallel(tasks, 5, nil)
+	_, err = blockstm.ExecuteParallel(tasks, 5, nil)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 
-	_, weight := result.Deps.LongestPath(*result.Stats)
-	serialWeight := uint64(0)
-	for i := 0; i < len(result.Deps.GetVertices()); i++ {
-		serialWeight += (*result.Stats)[i].End - (*result.Stats)[i].Start
-	}
-	log.Info("Parallel execution weight", "weight", weight, "serialWeight", serialWeight)
-	parallelizability := time.Duration(serialWeight * 100 / weight)
-	log.Info("Parallel execution parallelizability", "parallelizability", parallelizability)
-	parallelizabilityTimer.Update(parallelizability)
+	// Sort receipts by transaction index
+	sort.Slice(receipts, func(i, j int) bool {
+		return receipts[i].TransactionIndex < receipts[j].TransactionIndex
+	})
+
+	log.Info("Parallel execution", "tasks", len(tasks))
+
+	// _, weight := result.Deps.LongestPath(*result.Stats)
+	// serialWeight := uint64(0)
+	// for i := 0; i < len(result.Deps.GetVertices()); i++ {
+	// 	serialWeight += (*result.Stats)[i].End - (*result.Stats)[i].Start
+	// }
+	// log.Info("Parallel execution weight", "weight", weight, "serialWeight", serialWeight)
+	// parallelizability := time.Duration(serialWeight * 100 / weight)
+	// log.Info("Parallel execution parallelizability", "parallelizability", parallelizability)
+	// parallelizabilityTimer.Update(parallelizability)
 
 	duration := time.Since(start)
 	log.Info("Parallel execution completed",
@@ -341,6 +369,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 	if err = p.engine.Finalize(p.bc, block, parent, statedb, receipts); err != nil {
 		return nil, nil, 0, fmt.Errorf("engine finalization check failed: %w", err)
 	}
+
+	log.Info("[PARALLEL PROCESSOR] Block processed", "block", block.Hash().Hex(), "duration", time.Since(now))
 
 	return receipts, allLogs, *usedGas, nil
 }
