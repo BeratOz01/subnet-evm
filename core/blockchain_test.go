@@ -94,6 +94,7 @@ func createParallelBlockChain(
 	)
 	return blockchain, err
 }
+
 func TestArchiveBlockChain(t *testing.T) {
 	createArchiveBlockChain := func(db ethdb.Database, gspec *Genesis, lastAcceptedHash common.Hash, _ string) (*BlockChain, error) {
 		return createBlockChain(db, archiveConfig, gspec, lastAcceptedHash)
@@ -1078,5 +1079,43 @@ func TestEIP3651(t *testing.T) {
 	actual = new(big.Int).Sub(funds, state.GetBalance(addr1).ToBig())
 	if actual.Cmp(expected) != 0 {
 		t.Fatalf("sender balance incorrect: expected %d, got %d", expected, actual)
+	}
+}
+
+func TestParallelBlockChain(t *testing.T) {
+	key1, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	addr1 := crypto.PubkeyToAddress(key1.PublicKey)
+	addr2 := common.HexToAddress("0x2")
+
+	genesisBalance := new(big.Int).Mul(big.NewInt(5), big.NewInt(ethparams.Ether)) // 5 Ether
+
+	gspec := &Genesis{
+		Config: params.WithExtra(
+			&params.ChainConfig{HomesteadBlock: new(big.Int)},
+			&extras.ChainConfig{FeeConfig: params.DefaultFeeConfig},
+		),
+		Alloc:   types.GenesisAlloc{addr1: {Balance: genesisBalance}},
+		BaseFee: big.NewInt(ethparams.InitialBaseFee),
+	}
+	db := rawdb.NewMemoryDatabase()
+
+	blockchain, err := createParallelBlockChain(db, archiveConfig, gspec, common.Hash{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockchain.Stop()
+
+	signer := types.LatestSigner(gspec.Config)
+	_, chain, _, err := GenerateChainWithGenesis(gspec, blockchain.engine, 10, 10, func(i int, gen *BlockGen) {
+		tx, _ := types.SignTx(types.NewTransaction(gen.TxNonce(addr1), addr2, big.NewInt(10000), ethparams.TxGas*2, nil, nil), signer, key1)
+		gen.AddTx(tx)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert the new block into the chain. This will trigger the ParallelStateProcessor.
+	if _, err := blockchain.InsertChain(chain); err != nil {
+		t.Fatal(err)
 	}
 }

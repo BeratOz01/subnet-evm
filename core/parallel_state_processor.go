@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/ava-labs/libevm/common"
@@ -38,7 +39,6 @@ import (
 	"github.com/ava-labs/libevm/core/vm"
 	"github.com/ava-labs/libevm/crypto"
 	"github.com/ava-labs/libevm/log"
-	"github.com/ava-labs/libevm/metrics"
 	ethparams "github.com/ava-labs/libevm/params"
 	"github.com/ava-labs/subnet-evm/consensus"
 	"github.com/ava-labs/subnet-evm/core/blockstm"
@@ -78,23 +78,23 @@ type ExecutionTask struct {
 	msg    Message
 	config *params.ChainConfig
 
-	gasLimit                   uint64
-	blockNumber                *big.Int
-	blockHash                  common.Hash
-	tx                         *types.Transaction
-	index                      int
-	statedb                    *state.StateDB // state database that stores the modified values after tx execution
-	cleanStatedb               *state.StateDB // a clean copy of the initial statedb (should not be modified)
-	finalStatedb               *state.StateDB // the final state database after tx execution
-	header                     *types.Header
-	blockChain                 *BlockChain
-	evmConfig                  vm.Config
-	result                     *ExecutionResult
-	shouldRerunWithoutFeeDelay bool // ??
-	sender                     common.Address
-	totalUsedGas               *uint64
-	receipts                   *types.Receipts
-	allLogs                    *[]*types.Log
+	gasLimit     uint64
+	blockNumber  *big.Int
+	blockHash    common.Hash
+	tx           *types.Transaction
+	index        int
+	statedb      *state.StateDB // state database that stores the modified values after tx execution
+	cleanStatedb *state.StateDB // a clean copy of the initial statedb (should not be modified)
+	finalStatedb *state.StateDB // the final state database after tx execution
+	header       *types.Header
+	blockChain   *BlockChain
+	evmConfig    vm.Config
+	result       *ExecutionResult
+	sender       common.Address
+	totalUsedGas *uint64
+	receiptsMu   sync.Mutex
+	receipts     *types.Receipts
+	allLogs      *[]*types.Log
 
 	// length of dependencies          -> 2 + k (k = a whole number)
 	// first 2 element in dependencies -> transaction index, and flag representing if delay is allowed or not
@@ -112,7 +112,7 @@ func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (er
 	log.Info("[PARALLEL PROCESSOR] Executing transaction", "tx", task.tx.Hash().Hex())
 
 	// copy the clean statedb to the statedb
-	task.statedb = task.cleanStatedb.Copy()
+	task.statedb = task.finalStatedb.Copy()
 	task.statedb.SetTxContext(task.tx.Hash(), task.index)
 	task.statedb.SetMVHashMap(mvh)
 	task.statedb.SetIncarnation(incarnation)
@@ -122,6 +122,7 @@ func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (er
 
 	// create new evm instance
 	evm := vm.NewEVM(task.blockContext, txContext, task.statedb, task.config, task.evmConfig)
+	evm.Reset(txContext, task.statedb)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -143,6 +144,7 @@ func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (er
 	// finalize the state in backup state db
 	// will commit all changes to the statedb at the end of the block execution
 	task.statedb.Finalise(task.config.IsEIP158(task.blockNumber))
+
 	log.Info("[PARALLEL PROCESSOR] Transaction executed", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
 
 	return
@@ -181,7 +183,21 @@ func (task *ExecutionTask) Settle() {
 	task.finalStatedb.SetTxContext(task.tx.Hash(), task.index)
 
 	// apply the write set to the final statedb
-	task.finalStatedb.ApplyMVWriteSet(task.statedb.MVFullWriteList())
+	writeSet := task.statedb.MVFullWriteList()
+
+	for idx, write := range writeSet {
+		fmt.Printf("Writes [%d]: To: %v, StateKey: %v\n", idx, write.Path.GetAddress(), write.Path.GetStateKey().Big())
+	}
+
+	beforeRoot := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber))
+	fmt.Printf("SETTLE[%d]: State root before write set: %x\n", task.index, beforeRoot)
+
+	task.finalStatedb.ApplyMVWriteSet(writeSet)
+
+	afterRoot := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber))
+	fmt.Printf("SETTLE[%d]: State root after write set: %x\n", task.index, afterRoot)
+
+	fmt.Printf("PARALLEL: Final state root after tx %d: %x\n", task.index, afterRoot)
 
 	// add logs
 	for _, l := range task.statedb.GetLogs(task.tx.Hash(), task.blockNumber.Uint64(), task.blockHash) {
@@ -197,19 +213,18 @@ func (task *ExecutionTask) Settle() {
 	}
 
 	// update the state with pending changes
-	// var root []byte
-	// if task.config.IsByzantium(task.blockNumber) {
-	// 	task.finalStatedb.Finalise(true)
-	// } else {
-	// 	root = task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
-	// }
-	root := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
+	var root []byte
+	if task.config.IsByzantium(task.blockNumber) {
+		task.statedb.Finalise(true)
+	} else {
+		root = task.statedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
+	}
 
 	*task.totalUsedGas += task.result.UsedGas
 
 	// Create a new receipt for the transaction, storing the intermediate root and gas used
 	// by the tx.
-	receipt := &types.Receipt{Type: task.tx.Type(), PostState: root, CumulativeGasUsed: *task.totalUsedGas}
+	receipt := &types.Receipt{Type: task.tx.Type(), PostState: root, CumulativeGasUsed: task.result.UsedGas}
 	if task.result.Failed() {
 		receipt.Status = types.ReceiptStatusFailed
 	} else {
@@ -229,19 +244,25 @@ func (task *ExecutionTask) Settle() {
 	}
 
 	// Set the receipt logs and create the bloom filter.
-	receipt.Logs = task.finalStatedb.GetLogs(task.tx.Hash(), task.blockNumber.Uint64(), task.blockHash)
+	receipt.Logs = task.statedb.GetLogs(task.tx.Hash(), task.blockNumber.Uint64(), task.blockHash)
 	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
 	receipt.BlockHash = task.blockHash
 	receipt.BlockNumber = task.blockNumber
 	receipt.TransactionIndex = uint(task.finalStatedb.TxIndex())
 
+	fmt.Printf("[PARALLEL PROCESSOR] receipt.PostState: %v\n", receipt.PostState)
+
+	// Debug: Print receipt details
+	fmt.Printf("PARALLEL RECEIPT[%d]: TxHash=%v, GasUsed=%v, CumulativeGasUsed=%v, Status=%v\n",
+		task.index, receipt.TxHash.Hex(), receipt.GasUsed, receipt.CumulativeGasUsed, receipt.Status)
+
+	task.receiptsMu.Lock()
 	*task.receipts = append(*task.receipts, receipt)
-	*task.allLogs = append(*task.allLogs, task.finalStatedb.Logs()...)
+	*task.allLogs = append(*task.allLogs, task.statedb.Logs()...)
+	task.receiptsMu.Unlock()
 
-	log.Info("[PARALLEL PROCESSOR] Transaction settled", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
+	fmt.Println("[PARALLEL PROCESSOR] Transaction settled", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
 }
-
-var parallelizabilityTimer = metrics.NewRegisteredTimer("block/parallelizability", nil)
 
 func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Header, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
 	now := time.Now()
@@ -275,9 +296,10 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 	log.Info("Transaction dependencies fetched successfully", "deps", deps)
 
 	var (
-		context = NewEVMBlockContext(header, p.bc, nil)
-		vmenv   = vm.NewEVM(context, vm.TxContext{}, statedb, p.config, cfg)
-		signer  = types.MakeSigner(p.config, header.Number, header.Time)
+		bblockContext = NewEVMBlockContext(header, p.bc, nil)
+		context       = NewEVMBlockContext(header, p.bc.hc, nil)
+		vmenv         = vm.NewEVM(context, vm.TxContext{}, statedb, p.config, cfg)
+		signer        = types.MakeSigner(p.config, header.Number, header.Time)
 	)
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
 		ProcessBeaconBlockRoot(*beaconRoot, vmenv, statedb)
@@ -299,7 +321,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		// get clean statedb
 		cleanState := statedb.Copy()
 
-		// Get dependencies for this transaction
 		txDeps := []int{}
 		if depsForTx, exists := deps[i]; exists {
 			txDeps = depsForTx
@@ -325,7 +346,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 			allLogs:      &allLogs,
 			dependencies: txDeps,
 			coinbase:     header.Coinbase,
-			blockContext: context,
+			blockContext: bblockContext,
+			receiptsMu:   sync.Mutex{},
 		}
 
 		tasks = append(tasks, task)
@@ -346,31 +368,33 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		return receipts[i].TransactionIndex < receipts[j].TransactionIndex
 	})
 
+	for _, receipt := range receipts {
+		fmt.Println("--------------------------------")
+		fmt.Printf("tx.Hash(): %v\n", receipt.TxHash)
+		fmt.Printf("receipt.PostState: %v\n", receipt.PostState)
+		fmt.Println("--------------------------------")
+	}
+
 	log.Info("Parallel execution", "tasks", len(tasks))
 
-	// _, weight := result.Deps.LongestPath(*result.Stats)
-	// serialWeight := uint64(0)
-	// for i := 0; i < len(result.Deps.GetVertices()); i++ {
-	// 	serialWeight += (*result.Stats)[i].End - (*result.Stats)[i].Start
-	// }
-	// log.Info("Parallel execution weight", "weight", weight, "serialWeight", serialWeight)
-	// parallelizability := time.Duration(serialWeight * 100 / weight)
-	// log.Info("Parallel execution parallelizability", "parallelizability", parallelizability)
-	// parallelizabilityTimer.Update(parallelizability)
-
 	duration := time.Since(start)
-	log.Info("Parallel execution completed",
+	fmt.Println("Parallel execution completed",
 		"duration", duration,
 		"task_count", len(tasks),
 		"avg_time_per_tx", duration/time.Duration(len(tasks)),
 		"receipts", len(receipts))
+
+	// Finalize the state after all transactions have been applied
+
+	// Finalize the state after all transactions have been applied
+	statedb.Finalise(p.config.IsEIP158(block.Number()))
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	if err = p.engine.Finalize(p.bc, block, parent, statedb, receipts); err != nil {
 		return nil, nil, 0, fmt.Errorf("engine finalization check failed: %w", err)
 	}
 
-	log.Info("[PARALLEL PROCESSOR] Block processed", "block", block.Hash().Hex(), "duration", time.Since(now))
+	fmt.Println("[PARALLEL PROCESSOR] Block processed", "block", block.Hash().Hex(), "duration", time.Since(now))
 
 	return receipts, allLogs, *usedGas, nil
 }
@@ -405,50 +429,4 @@ func verifyDeps(deps map[int][]int) bool {
 	}
 
 	return true
-}
-
-// NewExecutionTask creates a new ExecutionTask with all fields properly initialized
-func NewExecutionTask(
-	msg Message,
-	config *params.ChainConfig,
-	gasLimit uint64,
-	blockNumber *big.Int,
-	blockHash common.Hash,
-	tx *types.Transaction,
-	index int,
-	cleanStatedb *state.StateDB,
-	finalStatedb *state.StateDB,
-	header *types.Header,
-	blockChain *BlockChain,
-	evmConfig vm.Config,
-	sender common.Address,
-	totalUsedGas *uint64,
-	receipts *types.Receipts,
-	allLogs *[]*types.Log,
-	dependencies []int,
-	coinbase common.Address,
-	blockContext vm.BlockContext,
-) ExecutionTask {
-	return ExecutionTask{
-		msg:                        msg,
-		config:                     config,
-		gasLimit:                   gasLimit,
-		blockNumber:                blockNumber,
-		blockHash:                  blockHash,
-		tx:                         tx,
-		index:                      index,
-		cleanStatedb:               cleanStatedb,
-		finalStatedb:               finalStatedb,
-		header:                     header,
-		blockChain:                 blockChain,
-		evmConfig:                  evmConfig,
-		sender:                     sender,
-		totalUsedGas:               totalUsedGas,
-		receipts:                   receipts,
-		allLogs:                    allLogs,
-		dependencies:               dependencies,
-		coinbase:                   coinbase,
-		blockContext:               blockContext,
-		shouldRerunWithoutFeeDelay: false, // Default to false
-	}
 }

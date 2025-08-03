@@ -307,7 +307,7 @@ func (mv *MVHashMap) Read(k STMKey, txIndex int) MVReadResult {
 	case EstimateFlag:
 		{
 			result.dependencyIdx = foundKey.(int)
-			result.incarnation = c.incarnation
+			// result.incarnation = -1
 			result.data = c.data
 		}
 	default:

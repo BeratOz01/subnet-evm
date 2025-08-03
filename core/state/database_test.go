@@ -16,10 +16,12 @@ import (
 	"github.com/ava-labs/libevm/libevm/stateconf"
 	"github.com/ava-labs/libevm/trie/trienode"
 	"github.com/ava-labs/libevm/triedb"
+	"github.com/ava-labs/subnet-evm/core/blockstm"
 	"github.com/ava-labs/subnet-evm/triedb/firewood"
 	"github.com/ava-labs/subnet-evm/triedb/hashdb"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
+	"gotest.tools/assert"
 )
 
 const (
@@ -364,4 +366,518 @@ func FuzzTree(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestMVHashMapReadWriteDelete(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 4; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr := common.HexToAddress("0x01")
+	key := common.HexToHash("0x01")
+	val := common.HexToHash("0x01")
+	balance := uint256.NewInt(100)
+
+	// Tx0 read
+	v := states[0].GetState(addr, key)
+
+	assert.Equal(t, common.Hash{}, v)
+
+	// Tx1 write
+	states[1].getOrNewStateObject(addr)
+	states[1].SetState(addr, key, val)
+	states[1].SetBalance(addr, balance)
+	states[1].FlushMVWriteSet()
+
+	// Tx1 read
+	v = states[1].GetState(addr, key)
+	b := states[1].GetBalance(addr)
+
+	assert.Equal(t, val, v)
+	assert.Equal(t, balance, b)
+
+	// Tx2 read
+	v = states[2].GetState(addr, key)
+	b = states[2].GetBalance(addr)
+
+	assert.Equal(t, val, v)
+	assert.Equal(t, balance, b)
+
+	// Tx3 delete
+	states[3].SelfDestruct(addr)
+
+	// Within Tx 3, the state should not change before finalize
+	v = states[3].GetState(addr, key)
+	assert.Equal(t, val, v)
+
+	// After finalizing Tx 3, the state will change
+	states[3].Finalise(false)
+	v = states[3].GetState(addr, key)
+	assert.Equal(t, common.Hash{}, v)
+	states[3].FlushMVWriteSet()
+
+	// Tx4 read
+	v = states[4].GetState(addr, key)
+	b = states[4].GetBalance(addr)
+
+	assert.Equal(t, common.Hash{}, v)
+	assert.Equal(t, b.Cmp(uint256.NewInt(0)), 0)
+}
+
+func TestMVHashMapCreateContract(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 4; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr := common.HexToAddress("0x01")
+	states[0].SetBalance(addr, uint256.NewInt(100))
+	states[0].FlushMVWriteSet()
+
+	states[1].CreateAccount(addr)
+	states[1].FlushMVWriteSet()
+
+	b := states[1].GetBalance(addr)
+	assert.Equal(t, b.Cmp(uint256.NewInt(100)), 0)
+}
+
+func TestMVHashMapRevert(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 4; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr := common.HexToAddress("0x01")
+	key := common.HexToHash("0x01")
+	val := common.HexToHash("0x01")
+	balance := uint256.NewInt(100)
+
+	// Tx0 write
+	states[0].getOrNewStateObject(addr)
+	states[0].SetState(addr, key, val)
+	states[0].SetBalance(addr, balance)
+	states[0].FlushMVWriteSet()
+
+	// Tx1 perform some ops and then revert
+	snapshot := states[1].Snapshot()
+	states[1].AddBalance(addr, uint256.NewInt(100))
+	states[1].SetState(addr, key, common.HexToHash("0x02"))
+	v := states[1].GetState(addr, key)
+	b := states[1].GetBalance(addr)
+	assert.Equal(t, b.Cmp(uint256.NewInt(200)), 0)
+	assert.Equal(t, common.HexToHash("0x02"), v)
+
+	states[1].SelfDestruct(addr)
+
+	states[1].RevertToSnapshot(snapshot)
+
+	v = states[1].GetState(addr, key)
+	b = states[1].GetBalance(addr)
+
+	assert.Equal(t, val, v)
+	assert.Equal(t, b.Cmp(balance), 0)
+	states[1].Finalise(false)
+	states[1].FlushMVWriteSet()
+
+	// Tx2 check the state and balance
+	v = states[2].GetState(addr, key)
+	b = states[2].GetBalance(addr)
+
+	assert.Equal(t, val, v)
+	assert.Equal(t, b.Cmp(balance), 0)
+}
+func TestMVHashMapMarkEstimate(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 4; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr := common.HexToAddress("0x01")
+	key := common.HexToHash("0x01")
+	val := common.HexToHash("0x01")
+	balance := uint256.NewInt(100)
+
+	// Tx0 read
+	v := states[0].GetState(addr, key)
+	assert.Equal(t, common.Hash{}, v)
+
+	// Tx0 write
+	states[0].SetState(addr, key, val)
+	v = states[0].GetState(addr, key)
+	assert.Equal(t, val, v)
+	states[0].FlushMVWriteSet()
+
+	// Tx1 write
+	states[1].GetOrNewStateObject(addr)
+	states[1].SetState(addr, key, val)
+	states[1].SetBalance(addr, balance)
+	states[1].FlushMVWriteSet()
+
+	// Tx2 read
+	v = states[2].GetState(addr, key)
+	b := states[2].GetBalance(addr)
+
+	assert.Equal(t, val, v)
+	assert.Equal(t, balance, b)
+
+	// Tx1 mark estimate
+	for _, v := range states[1].MVWriteList() {
+		mvhm.MarkEstimate(v.Path, 1)
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("The code did not panic")
+		} else {
+			t.Log("Recovered in f", r)
+		}
+	}()
+
+	// Tx2 read again should get default (empty) vals because its dependency Tx1 is marked as estimate
+	states[2].GetState(addr, key)
+	states[2].GetBalance(addr)
+
+	// Tx1 read again should get Tx0 vals
+	v = states[1].GetState(addr, key)
+	assert.Equal(t, val, v)
+}
+
+func TestMVHashMapWriteNoConflict(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 6; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr := common.HexToAddress("0x01")
+	key1 := common.HexToHash("0x01")
+	key2 := common.HexToHash("0x02")
+	val1 := common.HexToHash("0x01")
+	balance1 := uint256.NewInt(100)
+	val2 := common.HexToHash("0x02")
+
+	// Tx0 write
+	states[0].GetOrNewStateObject(addr)
+	states[0].FlushMVWriteSet()
+
+	// Tx2 write
+	states[2].SetState(addr, key2, val2)
+	states[2].FlushMVWriteSet()
+
+	// Tx1 write
+	tx1Snapshot := states[1].Snapshot()
+	states[1].SetState(addr, key1, val1)
+	states[1].SetBalance(addr, balance1)
+	states[1].FlushMVWriteSet()
+
+	// Tx1 read
+	assert.Equal(t, val1, states[1].GetState(addr, key1))
+	assert.Equal(t, balance1, states[1].GetBalance(addr))
+	// Tx1 should see empty value in key2
+	assert.Equal(t, common.Hash{}, states[1].GetState(addr, key2))
+
+	// Tx2 read
+	assert.Equal(t, val2, states[2].GetState(addr, key2))
+	// Tx2 should see values written by Tx1
+	assert.Equal(t, val1, states[2].GetState(addr, key1))
+	assert.Equal(t, balance1, states[2].GetBalance(addr))
+
+	// Tx3 read
+	assert.Equal(t, val1, states[3].GetState(addr, key1))
+	assert.Equal(t, val2, states[3].GetState(addr, key2))
+	assert.Equal(t, balance1, states[3].GetBalance(addr))
+
+	// Tx2 delete
+	for _, v := range states[2].writeMap {
+		mvhm.Delete(v.Path, 2)
+
+		states[2].writeMap = nil
+	}
+
+	assert.Equal(t, val1, states[4].GetState(addr, key1))
+	assert.Equal(t, balance1, states[4].GetBalance(addr))
+	assert.Equal(t, common.Hash{}, states[4].GetState(addr, key2))
+
+	// Tx1 revert
+	states[1].RevertToSnapshot(tx1Snapshot)
+	states[1].FlushMVWriteSet()
+
+	assert.Equal(t, common.Hash{}, states[5].GetState(addr, key1))
+	assert.Equal(t, common.Hash{}, states[5].GetState(addr, key2))
+	assert.Equal(t, uint256.NewInt(0).Uint64(), states[5].GetBalance(addr).Uint64())
+
+	// Tx1 delete
+	for _, v := range states[1].writeMap {
+		mvhm.Delete(v.Path, 1)
+
+		states[1].writeMap = nil
+	}
+
+	assert.Equal(t, common.Hash{}, states[6].GetState(addr, key1))
+	assert.Equal(t, common.Hash{}, states[6].GetState(addr, key2))
+	assert.Equal(t, uint256.NewInt(0).Uint64(), states[6].GetBalance(addr).Uint64())
+}
+
+func TestApplyMVWriteSet(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	sClean := s.Copy()
+	sClean.mvHashmap = nil
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 4; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr1 := common.HexToAddress("0x01")
+	addr2 := common.HexToAddress("0x02")
+	addr3 := common.HexToAddress("0x03")
+	key1 := common.HexToHash("0x01")
+	key2 := common.HexToHash("0x02")
+	val1 := common.HexToHash("0x01")
+	balance1 := uint256.NewInt(100)
+	val2 := common.HexToHash("0x02")
+	balance2 := uint256.NewInt(200)
+	code := []byte{1, 2, 3}
+
+	// Tx0 write
+	states[0].GetOrNewStateObject(addr1)
+	states[0].SetState(addr1, key1, val1)
+	states[0].SetBalance(addr1, balance1)
+	states[0].SetState(addr2, key2, val2)
+	states[0].GetOrNewStateObject(addr3)
+	states[0].Finalise(true)
+	states[0].FlushMVWriteSet()
+
+	sClean.ApplyMVWriteSet(states[0].MVWriteList())
+
+	// Tx1 write
+	states[1].SetState(addr1, key2, val2)
+	states[1].SetBalance(addr1, balance2)
+	states[1].SetNonce(addr1, 1)
+	states[1].Finalise(true)
+	states[1].FlushMVWriteSet()
+
+	sClean.ApplyMVWriteSet(states[1].MVWriteList())
+
+	// Tx2 write
+	states[2].SetState(addr1, key1, val2)
+	states[2].SetBalance(addr1, balance2)
+	states[2].SetNonce(addr1, 2)
+	states[2].Finalise(true)
+	states[2].FlushMVWriteSet()
+
+	sClean.ApplyMVWriteSet(states[2].MVWriteList())
+
+	// Tx3 write
+	states[3].SelfDestruct(addr2)
+	states[3].SetCode(addr1, code)
+	states[3].Finalise(true)
+	states[3].FlushMVWriteSet()
+
+	sClean.ApplyMVWriteSet(states[3].MVWriteList())
+}
+
+func TestMVHashMapRevertConcurrent(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 2; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr := common.HexToAddress("0x01")
+	balance := uint256.NewInt(100)
+
+	// Tx0 touches the account. Amount doesn't matter.
+	// This is to make sure that Tx1 and Tx2 will use the same state object from Tx0.
+	states[0].AddBalance(addr, uint256.MustFromBig(common.Big0))
+	states[0].Finalise(false)
+	states[0].FlushMVWriteSet()
+
+	// Tx1 creates the account and add balance
+	snapshot1 := states[1].Snapshot()
+	states[1].CreateAccount(addr)
+	states[1].AddBalance(addr, balance)
+
+	// Tx2 creates the account, reverts.
+	snapshot2 := states[2].Snapshot()
+	states[2].CreateAccount(addr)
+	states[2].RevertToSnapshot(snapshot2)
+	states[2].Finalise(false)
+
+	// Tx2 adds balance
+	states[2].AddBalance(addr, balance)
+
+	// Tx1 now reverts
+	states[1].RevertToSnapshot(snapshot1)
+	states[1].Finalise(false)
+
+	// Balance after executing Tx0 should be 0 because it shouldn't be affected by Tx1 or Tx2
+	b := states[0].GetBalance(addr)
+	assert.Equal(t, 0, b.Cmp(uint256.NewInt(0)))
+
+	// Balance after executing Tx1 should be 0 because Tx1 got reverted
+	b = states[1].GetBalance(addr)
+	assert.Equal(t, 0, b.Cmp(uint256.NewInt(0)))
+
+	// Balance after executing Tx2 should be 100 because its snapshot is taken before Tx1 got reverted
+	b = states[2].GetBalance(addr)
+	assert.Equal(t, 0, b.Cmp(balance))
+}
+
+func TestMVHashMapOverwrite(t *testing.T) {
+	t.Parallel()
+
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	mvhm := blockstm.NewMVHashMap()
+	s, _ := New(common.Hash{}, db, nil)
+	s.SetMVHashMap(mvhm)
+
+	states := []*StateDB{s}
+
+	// Create copies of the original state for each transition
+	for i := 1; i <= 5; i++ {
+		sCopy := s.Copy()
+		sCopy.txIndex = i
+		states = append(states, sCopy)
+	}
+
+	addr := common.HexToAddress("0x01")
+	key := common.HexToHash("0x01")
+	val1 := common.HexToHash("0x01")
+	balance1 := uint256.NewInt(100)
+	val2 := common.HexToHash("0x02")
+	balance2 := uint256.NewInt(200)
+
+	// Tx0 write
+	states[0].GetOrNewStateObject(addr)
+	states[0].SetState(addr, key, val1)
+	states[0].SetBalance(addr, balance1)
+	states[0].FlushMVWriteSet()
+
+	// Tx1 write
+	states[1].SetState(addr, key, val2)
+	states[1].SetBalance(addr, balance2)
+	v := states[1].GetState(addr, key)
+	b := states[1].GetBalance(addr)
+	states[1].FlushMVWriteSet()
+
+	assert.Equal(t, val2, v)
+	assert.Equal(t, balance2, b)
+
+	// Tx2 read should get Tx1's value
+	v = states[2].GetState(addr, key)
+	b = states[2].GetBalance(addr)
+
+	assert.Equal(t, val2, v)
+	assert.Equal(t, balance2, b)
+
+	// Tx1 delete
+	for _, v := range states[1].writeMap {
+		mvhm.Delete(v.Path, 1)
+
+		states[1].writeMap = nil
+	}
+
+	// Tx3 read should get Tx0's value
+	v = states[3].GetState(addr, key)
+	b = states[3].GetBalance(addr)
+
+	assert.Equal(t, val1, v)
+	assert.Equal(t, balance1, b)
+
+	// Tx1 read should get Tx0's value
+	v = states[1].GetState(addr, key)
+	b = states[1].GetBalance(addr)
+
+	assert.Equal(t, val1, v)
+	assert.Equal(t, balance1, b)
+
+	// Tx0 delete
+	for _, v := range states[0].writeMap {
+		mvhm.Delete(v.Path, 0)
+
+		states[0].writeMap = nil
+	}
+
+	// Tx4 read again should get default vals
+	v = states[4].GetState(addr, key)
+	b = states[4].GetBalance(addr)
+
+	assert.Equal(t, common.Hash{}, v)
+	assert.Equal(t, uint256.NewInt(0).Uint64(), b.Uint64())
 }

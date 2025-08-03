@@ -35,7 +35,6 @@ import (
 	ethstate "github.com/ava-labs/libevm/core/state"
 	"github.com/ava-labs/libevm/crypto"
 	"github.com/ava-labs/libevm/libevm/stateconf"
-	"github.com/ava-labs/subnet-evm/constants"
 	"github.com/ava-labs/subnet-evm/core/blockstm"
 	"github.com/ava-labs/subnet-evm/utils"
 	"github.com/holiman/uint256"
@@ -104,7 +103,7 @@ func WithConcurrentWorkers(prefetchers int) ethstate.PrefetcherOption {
 
 // SetState sets the state of the address
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash, opts ...stateconf.StateDBStateOption) {
-	stateObject := s.GetOrNewStateObject(addr)
+	stateObject := s.getOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject = s.mvRecordWritten(stateObject)
 		MVWrite(s, blockstm.NewStateKey(addr, key))
@@ -238,30 +237,9 @@ type StorageVal[T any] struct {
 	Value *T
 }
 
-func shouldSkipAddress(addr common.Address) bool {
-	// if address is blackhole address or system address, skip
-	if addr == constants.BlackholeAddr {
-		return true
-	}
-
-	// if address is 0 address
-	if addr == (common.Address{}) {
-		return true
-	}
-
-	// skip precompile address ranges: 0x01, 0x02, 0x03
-	firstByte := addr.Bytes()[0]
-	return firstByte == 0x01 || firstByte == 0x02 || firstByte == 0x03
-}
-
 // MVRead reads a value from the StateDB using the MVHashMap
 func MVRead[T any](s *StateDB, k blockstm.STMKey, defaultV T, readStorage func(s *StateDB) T) (v T) {
 	if s.mvHashmap == nil {
-		return readStorage(s)
-	}
-
-	// need to skip system operations if the address is the blackhole address or system address (like precompile addresses)
-	if shouldSkipAddress(k.GetAddress()) {
 		return readStorage(s)
 	}
 
@@ -269,20 +247,20 @@ func MVRead[T any](s *StateDB, k blockstm.STMKey, defaultV T, readStorage func(s
 
 	if s.writeMap != nil {
 		if _, ok := s.writeMap[k]; ok {
+			// If the key is in the writeMap, read from the current transaction's state
+			// This ensures we read the most recent value written by this transaction
 			return readStorage(s)
 		}
 	}
 
 	if !k.IsAddress() {
-		// If we are reading subpath from a deleted account, return default value instead of reading from MVHashmap
 		addr := k.GetAddress()
-		if !s.StateDB.Exist(addr) {
+		if s.getStateObject(addr) == nil {
 			return defaultV
 		}
 	}
 
 	res := s.mvHashmap.Read(k, s.txIndex)
-
 	var rd blockstm.ReadOperation
 
 	rd.Version = blockstm.Version{
@@ -295,6 +273,7 @@ func MVRead[T any](s *StateDB, k blockstm.STMKey, defaultV T, readStorage func(s
 	switch res.Status() {
 	case blockstm.MVReadDone:
 		{
+			// Data now contains the actual value, not a StateDB
 			v = readStorage(res.Data().(*StateDB))
 			rd.Kind = blockstm.ReadFromMVHashMap
 		}
@@ -327,21 +306,17 @@ func MVRead[T any](s *StateDB, k blockstm.STMKey, defaultV T, readStorage func(s
 
 // MVWrite writes a value to the StateDB using the MVHashMap
 func MVWrite(s *StateDB, k blockstm.STMKey) {
-	// whenever the key type is address, skip if the address is blackhole address or system address
-	if shouldSkipAddress(k.GetAddress()) {
-		return
+	if s.writeMap == nil {
+		s.ensureWriteMap()
 	}
 
-	if s.mvHashmap != nil {
-		s.ensureWriteMap()
-		s.writeMap[k] = blockstm.WriteOperation{
-			Path: k,
-			Data: s,
-			Version: blockstm.Version{
-				TransactionIndex: s.txIndex,
-				Incarnation:      s.incarnation,
-			},
-		}
+	s.writeMap[k] = blockstm.WriteOperation{
+		Path: k,
+		Data: s,
+		Version: blockstm.Version{
+			TransactionIndex: s.txIndex,
+			Incarnation:      s.incarnation,
+		},
 	}
 }
 
@@ -375,6 +350,7 @@ const SuicidePath = 4
 // ApplyMVWriteSet applies entries in a given write set to StateDB. Note that this function does not change MVHashMap nor write set
 // of the current StateDB.
 func (s *StateDB) ApplyMVWriteSet(writes []blockstm.WriteOperation) {
+	// need to sort the writes by the transaction index
 	for i := range writes {
 		path := writes[i].Path
 		sr := writes[i].Data.(*StateDB)
@@ -407,6 +383,46 @@ func (s *StateDB) ApplyMVWriteSet(writes []blockstm.WriteOperation) {
 	}
 }
 
+// func (s *StateDB) ApplyMVWriteSet(writes []blockstm.WriteOperation) {
+// 	for i := range writes {
+// 		path := writes[i].Path
+
+// 		if path.IsState() {
+// 			addr := path.GetAddress()
+// 			stateKey := path.GetStateKey()
+// 			// Data is now common.Hash
+// 			state := writes[i].Data.(common.Hash)
+// 			s.SetState(addr, stateKey, state)
+// 		} else if path.IsAddress() {
+// 			continue
+// 		} else {
+// 			addr := path.GetAddress()
+
+// 			switch path.GetSubpath() {
+// 			case BalancePath:
+// 				// Data is now *uint256.Int
+// 				balance := writes[i].Data.(*uint256.Int)
+// 				s.SetBalance(addr, balance)
+// 			case NoncePath:
+// 				// Data is now uint64
+// 				nonce := writes[i].Data.(uint64)
+// 				s.SetNonce(addr, nonce)
+// 			case CodePath:
+// 				// Data is now []byte
+// 				code := writes[i].Data.([]byte)
+// 				s.SetCode(addr, code)
+// 			case SuicidePath:
+// 				// Data is now bool
+// 				if writes[i].Data.(bool) {
+// 					s.SelfDestruct(addr)
+// 				}
+// 			default:
+// 				panic(fmt.Errorf("unknown key type: %d", path.GetSubpath()))
+// 			}
+// 		}
+// 	}
+// }
+
 // AddEmptyMVHashMap adds empty MVHashMap to StateDB
 func (s *StateDB) AddEmptyMVHashMap() {
 	mvh := blockstm.NewMVHashMap()
@@ -416,7 +432,11 @@ func (s *StateDB) AddEmptyMVHashMap() {
 // GetBalance returns the balance of the address with MVHashMap support
 func (s *StateDB) GetBalance(addr common.Address) *uint256.Int {
 	return MVRead(s, blockstm.NewSubpathKey(addr, BalancePath), uint256.NewInt(0), func(s *StateDB) *uint256.Int {
-		return s.StateDB.GetBalance(addr)
+		stateObject := s.getStateObject(addr)
+		if stateObject == nil {
+			return uint256.NewInt(0)
+		}
+		return stateObject.Balance()
 	})
 }
 
@@ -471,7 +491,7 @@ func (s *StateDB) HasSelfDestructed(addr common.Address) bool {
 
 // AddBalance adds the amount to the balance of the address
 func (s *StateDB) AddBalance(addr common.Address, amount *uint256.Int) {
-	stateObject := s.GetOrNewStateObject(addr)
+	stateObject := s.getOrNewStateObject(addr)
 	if stateObject == nil {
 		return
 	}
@@ -510,7 +530,7 @@ func (s *StateDB) SubBalance(addr common.Address, amount *uint256.Int) {
 
 // SetBalance sets the balance of the address
 func (s *StateDB) SetBalance(addr common.Address, amount *uint256.Int) {
-	stateObject := s.GetOrNewStateObject(addr)
+	stateObject := s.getOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject = s.mvRecordWritten(stateObject)
 		stateObject.SetBalance(amount)
@@ -520,7 +540,7 @@ func (s *StateDB) SetBalance(addr common.Address, amount *uint256.Int) {
 
 // SetNonce sets the nonce of the address
 func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
-	stateObject := s.GetOrNewStateObject(addr)
+	stateObject := s.getOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject = s.mvRecordWritten(stateObject)
 		stateObject.SetNonce(nonce)
@@ -530,7 +550,7 @@ func (s *StateDB) SetNonce(addr common.Address, nonce uint64) {
 
 // SetCode sets the code of the address
 func (s *StateDB) SetCode(addr common.Address, code []byte) {
-	stateObject := s.GetOrNewStateObject(addr)
+	stateObject := s.getOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject = s.mvRecordWritten(stateObject)
 		stateObject.SetCode(crypto.Keccak256Hash(code), code)
@@ -541,10 +561,11 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) {
 // SelfDestruct marks the address as self destructed
 func (s *StateDB) SelfDestruct(addr common.Address) {
 	// make sure the state object is not nil
-	stateObject := s.GetStateObject(addr)
+	stateObject := s.getStateObject(addr)
 	if stateObject == nil {
 		return
 	}
+	s.mvRecordWritten(stateObject)
 
 	// do the self destruct operation
 	s.StateDB.SelfDestruct(addr)
@@ -599,4 +620,12 @@ func (s *StateDB) getStateObject(addr common.Address) *ethstate.StateObject {
 	return MVRead(s, blockstm.NewAddressKey(addr), nil, func(s *StateDB) *ethstate.StateObject {
 		return s.StateDB.GetStateObject(addr)
 	})
+}
+
+func (s *StateDB) getOrNewStateObject(addr common.Address) *ethstate.StateObject {
+	obj := s.getStateObject(addr)
+	if obj == nil {
+		obj, _ = s.createObject(addr)
+	}
+	return obj
 }
