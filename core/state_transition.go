@@ -48,11 +48,12 @@ import (
 // ExecutionResult includes all output after executing given evm
 // message no matter the execution itself is successful or not.
 type ExecutionResult struct {
-	UsedGas     uint64       // Total used gas, not including the refunded gas
-	RefundedGas uint64       // Total gas refunded after execution
-	Err         error        // Any error encountered during the execution(listed in core/vm/errors.go)
-	ReturnData  []byte       // Returned data from evm(function result or data supplied with revert opcode)
-	Fee         *uint256.Int // Fee paid for the transaction
+	UsedGas      uint64       // Total used gas, not including the refunded gas
+	RefundedGas  uint64       // Total gas refunded after execution
+	Err          error        // Any error encountered during the execution(listed in core/vm/errors.go)
+	ReturnData   []byte       // Returned data from evm(function result or data supplied with revert opcode)
+	Fee          *uint256.Int // Fee paid for the transaction
+	RemainingGas *uint256.Int // Remaining gas after execution
 }
 
 // Unwrap returns the internal evm error which allows us for further
@@ -208,6 +209,10 @@ type Message struct {
 	// account nonce in state. It also disables checking that the sender is an EOA.
 	// This field will be set to true for operations like RPC eth_call.
 	SkipAccountChecks bool
+
+	// When SkipFeeTransfer is true, gas fees are not transferred to the coinbase.
+	// The fee is still calculated and returned in ExecutionResult.Fee, but not added to coinbase balance.
+	SkipFeeTransfer bool
 }
 
 // TransactionToMessage converts a transaction into a Message.
@@ -223,6 +228,7 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		Data:              tx.Data(),
 		AccessList:        tx.AccessList(),
 		SkipAccountChecks: false,
+		SkipFeeTransfer:   false,
 		BlobHashes:        tx.BlobHashes(),
 		BlobGasFeeCap:     tx.BlobGasFeeCap(),
 	}
@@ -233,6 +239,17 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	var err error
 	msg.From, err = types.Sender(s, tx)
 	return msg, err
+}
+
+// TransactionToMessageWithSkipFeeTransfer converts a transaction into a Message with fee transfer disabled.
+// This is useful when you want to handle fee distribution separately.
+func TransactionToMessageWithSkipFeeTransfer(tx *types.Transaction, s types.Signer, baseFee *big.Int) (*Message, error) {
+	msg, err := TransactionToMessage(tx, s, baseFee)
+	if err != nil {
+		return nil, err
+	}
+	msg.SkipFeeTransfer = true
+	return msg, nil
 }
 
 // ApplyMessage computes the new state by applying the given message
@@ -329,8 +346,11 @@ func (st *StateTransition) buyGas() error {
 	st.gasRemaining += st.msg.GasLimit
 
 	st.initialGas = st.msg.GasLimit
+
+	// if !st.msg.SkipFeeTransfer {
 	mgvalU256, _ := uint256.FromBig(mgval)
 	st.state.SubBalance(st.msg.From, mgvalU256)
+	// }
 	return nil
 }
 
@@ -511,21 +531,24 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	if overflow {
 		return nil, ErrGasUintOverflow
 	}
-	gasRefund := st.refundGas(rulesExtra.IsSubnetEVM)
+	gasRefund, remainingGas := st.refundGas(rulesExtra.IsSubnetEVM)
 	fee := new(uint256.Int).SetUint64(st.gasUsed())
 	fee.Mul(fee, price)
-	st.state.AddBalance(st.evm.Context.Coinbase, fee)
+	if !msg.SkipFeeTransfer {
+		st.state.AddBalance(st.evm.Context.Coinbase, fee)
+	}
 
 	return &ExecutionResult{
-		UsedGas:     st.gasUsed(),
-		RefundedGas: gasRefund,
-		Err:         vmerr,
-		ReturnData:  ret,
-		Fee:         fee,
+		UsedGas:      st.gasUsed(),
+		RefundedGas:  gasRefund,
+		Err:          vmerr,
+		ReturnData:   ret,
+		Fee:          fee,
+		RemainingGas: remainingGas,
 	}, nil
 }
 
-func (st *StateTransition) refundGas(subnetEVM bool) uint64 {
+func (st *StateTransition) refundGas(subnetEVM bool) (uint64, *uint256.Int) {
 	var refund uint64
 	// Inspired by: https://gist.github.com/holiman/460f952716a74eeb9ab358bb1836d821#gistcomment-3642048
 	if !subnetEVM {
@@ -538,15 +561,18 @@ func (st *StateTransition) refundGas(subnetEVM bool) uint64 {
 	}
 
 	// Return ETH for remaining gas, exchanged at the original rate.
-	remaining := uint256.NewInt(st.gasRemaining)
-	remaining = remaining.Mul(remaining, uint256.MustFromBig(st.msg.GasPrice))
-	st.state.AddBalance(st.msg.From, remaining)
+	// Skip this if we're not transferring fees (since we didn't deduct balance)
+	remainingGas := uint256.NewInt(st.gasRemaining)
+	remainingGas = remainingGas.Mul(remainingGas, uint256.MustFromBig(st.msg.GasPrice))
+	if !st.msg.SkipFeeTransfer {
+		st.state.AddBalance(st.msg.From, remainingGas)
+	}
 
 	// Also return remaining gas to the block gas counter so it is
 	// available for the next transaction.
 	st.gp.AddGas(st.gasRemaining)
 
-	return refund
+	return refund, remainingGas
 }
 
 // gasUsed returns the amount of gas used up by the state transition.

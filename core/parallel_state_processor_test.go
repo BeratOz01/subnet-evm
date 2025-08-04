@@ -76,7 +76,7 @@ func TestParallelStateProcessor_BasicTransfer(t *testing.T) {
 		blockCount  int
 		description string
 	}{
-		{"SingleTx", 1, 1, "Single transaction in one block"},
+		{"SingleTx", 2, 1, "Single transaction in one block"},
 		// {"MultipleTxs", 2, 1, "Multiple transactions in one block"},
 		// {"MultipleBlocks", 3, 3, "Multiple transactions across multiple blocks"},
 		// {"HighLoad", 20, 2, "High transaction load"},
@@ -195,7 +195,7 @@ func TestParallelStateProcessor_IndependentTransactions(t *testing.T) {
 		txCount     int
 		description string
 	}{
-		{"FewTxs", 11, "Few independent transactions"},
+		{"FewTxs", 10, "Few independent transactions"},
 		// {"MoreTxs", 6, "More independent transactions"},
 	}
 

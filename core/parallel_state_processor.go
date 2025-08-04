@@ -197,6 +197,18 @@ func (task *ExecutionTask) Settle() {
 		task.finalStatedb.AddLog(l)
 	}
 
+	// we will skip the fee transfer for the parallel processor
+	// and update the balance manually after the execution
+	if task.msg.SkipFeeTransfer {
+		if task.result.Fee != nil {
+			task.finalStatedb.AddBalance(task.coinbase, task.result.Fee)
+		}
+
+		if task.result.RemainingGas != nil {
+			task.finalStatedb.AddBalance(task.msg.From, task.result.RemainingGas)
+		}
+	}
+
 	// if preimage recording is enabled, add the preimages to the final statedb
 	if task.evmConfig.EnablePreimageRecording {
 		// add preimages
@@ -253,8 +265,6 @@ func (task *ExecutionTask) Settle() {
 	task.receiptsMu.Unlock()
 
 	fmt.Println("[PARALLEL PROCESSOR] Transaction settled", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
-	// latestRoot := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber))
-	// fmt.Printf("SETTLE [task %d] latestRoot: %v\n", task.index, latestRoot)
 }
 
 func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Header, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
@@ -303,7 +313,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 
 	// Iterate over and create execution tasks for individual transactions
 	for i, tx := range block.Transactions() {
-		msg, err := TransactionToMessage(tx, signer, header.BaseFee)
+		msg, err := TransactionToMessageWithSkipFeeTransfer(tx, signer, header.BaseFee)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
@@ -381,8 +391,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		return nil, nil, 0, fmt.Errorf("engine finalization check failed: %w", err)
 	}
 
-	// latestRoot = statedb.IntermediateRoot(p.config.IsEIP158(block.Number()))
-	// fmt.Printf("FINAL ROOT: %v\n", latestRoot)
+	latestRoot := statedb.IntermediateRoot(p.config.IsEIP158(block.Number()))
+	fmt.Printf("FINAL ROOT: %v\n", latestRoot)
 
 	fmt.Println("[PARALLEL PROCESSOR] Block processed", "block", block.Hash().Hex(), "duration", time.Since(now))
 	return receipts, allLogs, *usedGas, nil

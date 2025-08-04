@@ -309,6 +309,10 @@ func MVWrite(s *StateDB, k blockstm.STMKey) {
 	if s.mvHashmap != nil {
 		s.ensureWriteMap()
 
+		if k.GetAddress() == (common.Address{}) {
+			return
+		}
+
 		s.writeMap[k] = blockstm.WriteOperation{
 			Path: k,
 			Data: s,
@@ -374,7 +378,8 @@ func (s *StateDB) ApplyMVWriteSet(writes []blockstm.WriteOperation) {
 			case CodePath:
 				s.SetCode(addr, sr.GetCode(addr))
 			case SuicidePath:
-				if sr.Exist(addr) {
+				sObject := sr.getStateObject(addr)
+				if sObject != nil {
 					s.SelfDestruct(addr)
 				}
 			default:
