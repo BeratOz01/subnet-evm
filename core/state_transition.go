@@ -48,10 +48,11 @@ import (
 // ExecutionResult includes all output after executing given evm
 // message no matter the execution itself is successful or not.
 type ExecutionResult struct {
-	UsedGas     uint64 // Total used gas, not including the refunded gas
-	RefundedGas uint64 // Total gas refunded after execution
-	Err         error  // Any error encountered during the execution(listed in core/vm/errors.go)
-	ReturnData  []byte // Returned data from evm(function result or data supplied with revert opcode)
+	UsedGas     uint64       // Total used gas, not including the refunded gas
+	RefundedGas uint64       // Total gas refunded after execution
+	Err         error        // Any error encountered during the execution(listed in core/vm/errors.go)
+	ReturnData  []byte       // Returned data from evm(function result or data supplied with revert opcode)
+	Fee         *uint256.Int // Fee paid for the transaction
 }
 
 // Unwrap returns the internal evm error which allows us for further
@@ -520,6 +521,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		RefundedGas: gasRefund,
 		Err:         vmerr,
 		ReturnData:  ret,
+		Fee:         fee,
 	}, nil
 }
 

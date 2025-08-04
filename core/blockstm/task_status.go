@@ -1,6 +1,8 @@
 package blockstm
 
-import "sort"
+import (
+	"sort"
+)
 
 type taskStatusManager struct {
 	pending    []int                // pending transactions indexes
@@ -112,7 +114,7 @@ func (sm *taskStatusManager) addDependency(blocker int, dependent int) bool {
 		return len(bblockers) > 0
 	}
 
-	if _, ok := sm.dependency[dependent]; !ok {
+	if _, ok := sm.dependency[blocker]; !ok {
 		sm.dependency[blocker] = make(map[int]bool)
 	}
 

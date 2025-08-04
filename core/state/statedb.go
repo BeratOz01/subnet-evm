@@ -306,18 +306,19 @@ func MVRead[T any](s *StateDB, k blockstm.STMKey, defaultV T, readStorage func(s
 
 // MVWrite writes a value to the StateDB using the MVHashMap
 func MVWrite(s *StateDB, k blockstm.STMKey) {
-	if s.writeMap == nil {
+	if s.mvHashmap != nil {
 		s.ensureWriteMap()
+
+		s.writeMap[k] = blockstm.WriteOperation{
+			Path: k,
+			Data: s,
+			Version: blockstm.Version{
+				TransactionIndex: s.txIndex,
+				Incarnation:      s.incarnation,
+			},
+		}
 	}
 
-	s.writeMap[k] = blockstm.WriteOperation{
-		Path: k,
-		Data: s,
-		Version: blockstm.Version{
-			TransactionIndex: s.txIndex,
-			Incarnation:      s.incarnation,
-		},
-	}
 }
 
 // RevertWrite reverts a write to the StateDB
@@ -382,46 +383,6 @@ func (s *StateDB) ApplyMVWriteSet(writes []blockstm.WriteOperation) {
 		}
 	}
 }
-
-// func (s *StateDB) ApplyMVWriteSet(writes []blockstm.WriteOperation) {
-// 	for i := range writes {
-// 		path := writes[i].Path
-
-// 		if path.IsState() {
-// 			addr := path.GetAddress()
-// 			stateKey := path.GetStateKey()
-// 			// Data is now common.Hash
-// 			state := writes[i].Data.(common.Hash)
-// 			s.SetState(addr, stateKey, state)
-// 		} else if path.IsAddress() {
-// 			continue
-// 		} else {
-// 			addr := path.GetAddress()
-
-// 			switch path.GetSubpath() {
-// 			case BalancePath:
-// 				// Data is now *uint256.Int
-// 				balance := writes[i].Data.(*uint256.Int)
-// 				s.SetBalance(addr, balance)
-// 			case NoncePath:
-// 				// Data is now uint64
-// 				nonce := writes[i].Data.(uint64)
-// 				s.SetNonce(addr, nonce)
-// 			case CodePath:
-// 				// Data is now []byte
-// 				code := writes[i].Data.([]byte)
-// 				s.SetCode(addr, code)
-// 			case SuicidePath:
-// 				// Data is now bool
-// 				if writes[i].Data.(bool) {
-// 					s.SelfDestruct(addr)
-// 				}
-// 			default:
-// 				panic(fmt.Errorf("unknown key type: %d", path.GetSubpath()))
-// 			}
-// 		}
-// 	}
-// }
 
 // AddEmptyMVHashMap adds empty MVHashMap to StateDB
 func (s *StateDB) AddEmptyMVHashMap() {
@@ -590,7 +551,11 @@ func (s *StateDB) mvRecordWritten(object *ethstate.StateObject) *ethstate.StateO
 
 	// Deepcopy is needed to ensure that objects are not written by multiple transactions at the same time, because
 	// the input state object can come from a different transaction.
-	s.SetStateObject(object.DeepCopy(s.StateDB))
+	copied := object.DeepCopy(s.StateDB)
+	if object.GetTrieOfObject() != nil {
+		copied.SetTrie(s.db.CopyTrie(object.GetTrieOfObject()))
+	}
+	s.SetStateObject(copied)
 	MVWrite(s, addrKey)
 
 	return s.StateObjectFromMap(object.Address())

@@ -4,6 +4,7 @@ package state
 
 import (
 	"encoding/binary"
+	"math/big"
 	"math/rand"
 	"path/filepath"
 	"slices"
@@ -520,6 +521,7 @@ func TestMVHashMapRevert(t *testing.T) {
 	assert.Equal(t, val, v)
 	assert.Equal(t, b.Cmp(balance), 0)
 }
+
 func TestMVHashMapMarkEstimate(t *testing.T) {
 	t.Parallel()
 
@@ -553,7 +555,7 @@ func TestMVHashMapMarkEstimate(t *testing.T) {
 	states[0].FlushMVWriteSet()
 
 	// Tx1 write
-	states[1].GetOrNewStateObject(addr)
+	states[1].getOrNewStateObject(addr)
 	states[1].SetState(addr, key, val)
 	states[1].SetBalance(addr, balance)
 	states[1].FlushMVWriteSet()
@@ -612,7 +614,7 @@ func TestMVHashMapWriteNoConflict(t *testing.T) {
 	val2 := common.HexToHash("0x02")
 
 	// Tx0 write
-	states[0].GetOrNewStateObject(addr)
+	states[0].getOrNewStateObject(addr)
 	states[0].FlushMVWriteSet()
 
 	// Tx2 write
@@ -659,7 +661,7 @@ func TestMVHashMapWriteNoConflict(t *testing.T) {
 
 	assert.Equal(t, common.Hash{}, states[5].GetState(addr, key1))
 	assert.Equal(t, common.Hash{}, states[5].GetState(addr, key2))
-	assert.Equal(t, uint256.NewInt(0).Uint64(), states[5].GetBalance(addr).Uint64())
+	assert.Equal(t, states[5].GetBalance(addr).Cmp(uint256.NewInt(0)), 0)
 
 	// Tx1 delete
 	for _, v := range states[1].writeMap {
@@ -670,7 +672,7 @@ func TestMVHashMapWriteNoConflict(t *testing.T) {
 
 	assert.Equal(t, common.Hash{}, states[6].GetState(addr, key1))
 	assert.Equal(t, common.Hash{}, states[6].GetState(addr, key2))
-	assert.Equal(t, uint256.NewInt(0).Uint64(), states[6].GetBalance(addr).Uint64())
+	assert.Equal(t, states[6].GetBalance(addr).Cmp(uint256.NewInt(0)), 0)
 }
 
 func TestApplyMVWriteSet(t *testing.T) {
@@ -683,6 +685,8 @@ func TestApplyMVWriteSet(t *testing.T) {
 
 	sClean := s.Copy()
 	sClean.mvHashmap = nil
+
+	sSingleProcess := sClean.Copy()
 
 	states := []*StateDB{s}
 
@@ -705,15 +709,22 @@ func TestApplyMVWriteSet(t *testing.T) {
 	code := []byte{1, 2, 3}
 
 	// Tx0 write
-	states[0].GetOrNewStateObject(addr1)
+	states[0].getOrNewStateObject(addr1)
 	states[0].SetState(addr1, key1, val1)
 	states[0].SetBalance(addr1, balance1)
 	states[0].SetState(addr2, key2, val2)
-	states[0].GetOrNewStateObject(addr3)
+	states[0].getOrNewStateObject(addr3)
 	states[0].Finalise(true)
 	states[0].FlushMVWriteSet()
 
+	sSingleProcess.getOrNewStateObject(addr1)
+	sSingleProcess.SetState(addr1, key1, val1)
+	sSingleProcess.SetBalance(addr1, balance1)
+	sSingleProcess.SetState(addr2, key2, val2)
+	sSingleProcess.getOrNewStateObject(addr3)
+
 	sClean.ApplyMVWriteSet(states[0].MVWriteList())
+	assert.Equal(t, sSingleProcess.IntermediateRoot(true), sClean.IntermediateRoot(true))
 
 	// Tx1 write
 	states[1].SetState(addr1, key2, val2)
@@ -722,7 +733,12 @@ func TestApplyMVWriteSet(t *testing.T) {
 	states[1].Finalise(true)
 	states[1].FlushMVWriteSet()
 
+	sSingleProcess.SetState(addr1, key2, val2)
+	sSingleProcess.SetBalance(addr1, balance2)
+	sSingleProcess.SetNonce(addr1, 1)
+
 	sClean.ApplyMVWriteSet(states[1].MVWriteList())
+	assert.Equal(t, sSingleProcess.IntermediateRoot(true), sClean.IntermediateRoot(true))
 
 	// Tx2 write
 	states[2].SetState(addr1, key1, val2)
@@ -731,7 +747,12 @@ func TestApplyMVWriteSet(t *testing.T) {
 	states[2].Finalise(true)
 	states[2].FlushMVWriteSet()
 
+	sSingleProcess.SetState(addr1, key1, val2)
+	sSingleProcess.SetBalance(addr1, balance2)
+	sSingleProcess.SetNonce(addr1, 2)
+
 	sClean.ApplyMVWriteSet(states[2].MVWriteList())
+	assert.Equal(t, sSingleProcess.IntermediateRoot(true), sClean.IntermediateRoot(true))
 
 	// Tx3 write
 	states[3].SelfDestruct(addr2)
@@ -739,7 +760,11 @@ func TestApplyMVWriteSet(t *testing.T) {
 	states[3].Finalise(true)
 	states[3].FlushMVWriteSet()
 
+	sSingleProcess.SelfDestruct(addr2)
+	sSingleProcess.SetCode(addr1, code)
+
 	sClean.ApplyMVWriteSet(states[3].MVWriteList())
+	assert.Equal(t, sSingleProcess.IntermediateRoot(true), sClean.IntermediateRoot(true))
 }
 
 func TestMVHashMapRevertConcurrent(t *testing.T) {
@@ -760,7 +785,7 @@ func TestMVHashMapRevertConcurrent(t *testing.T) {
 	}
 
 	addr := common.HexToAddress("0x01")
-	balance := uint256.NewInt(100)
+	balance := new(big.Int).SetUint64(uint64(100))
 
 	// Tx0 touches the account. Amount doesn't matter.
 	// This is to make sure that Tx1 and Tx2 will use the same state object from Tx0.
@@ -771,7 +796,7 @@ func TestMVHashMapRevertConcurrent(t *testing.T) {
 	// Tx1 creates the account and add balance
 	snapshot1 := states[1].Snapshot()
 	states[1].CreateAccount(addr)
-	states[1].AddBalance(addr, balance)
+	states[1].AddBalance(addr, uint256.MustFromBig(balance))
 
 	// Tx2 creates the account, reverts.
 	snapshot2 := states[2].Snapshot()
@@ -780,7 +805,7 @@ func TestMVHashMapRevertConcurrent(t *testing.T) {
 	states[2].Finalise(false)
 
 	// Tx2 adds balance
-	states[2].AddBalance(addr, balance)
+	states[2].AddBalance(addr, uint256.MustFromBig(balance))
 
 	// Tx1 now reverts
 	states[1].RevertToSnapshot(snapshot1)
@@ -788,15 +813,15 @@ func TestMVHashMapRevertConcurrent(t *testing.T) {
 
 	// Balance after executing Tx0 should be 0 because it shouldn't be affected by Tx1 or Tx2
 	b := states[0].GetBalance(addr)
-	assert.Equal(t, 0, b.Cmp(uint256.NewInt(0)))
+	assert.Equal(t, b.Cmp(uint256.NewInt(0)), 0)
 
 	// Balance after executing Tx1 should be 0 because Tx1 got reverted
 	b = states[1].GetBalance(addr)
-	assert.Equal(t, 0, b.Cmp(uint256.NewInt(0)))
+	assert.Equal(t, b.Cmp(uint256.NewInt(0)), 0)
 
 	// Balance after executing Tx2 should be 100 because its snapshot is taken before Tx1 got reverted
 	b = states[2].GetBalance(addr)
-	assert.Equal(t, 0, b.Cmp(balance))
+	assert.Equal(t, b.Cmp(uint256.NewInt(100)), 0)
 }
 
 func TestMVHashMapOverwrite(t *testing.T) {
@@ -824,7 +849,7 @@ func TestMVHashMapOverwrite(t *testing.T) {
 	balance2 := uint256.NewInt(200)
 
 	// Tx0 write
-	states[0].GetOrNewStateObject(addr)
+	states[0].getOrNewStateObject(addr)
 	states[0].SetState(addr, key, val1)
 	states[0].SetBalance(addr, balance1)
 	states[0].FlushMVWriteSet()
@@ -879,5 +904,5 @@ func TestMVHashMapOverwrite(t *testing.T) {
 	b = states[4].GetBalance(addr)
 
 	assert.Equal(t, common.Hash{}, v)
-	assert.Equal(t, uint256.NewInt(0).Uint64(), b.Uint64())
+	assert.Equal(t, b.Cmp(uint256.NewInt(0)), 0)
 }

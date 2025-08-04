@@ -51,7 +51,7 @@ func (k *STMKey) GetAddress() common.Address {
 
 // GetStateKey returns the state from the key
 func (k *STMKey) GetStateKey() common.Hash {
-	return common.BytesToHash(k[common.AddressLength : KeyLength-1])
+	return common.BytesToHash(k[common.AddressLength : KeyLength-2])
 }
 
 // GetSubpath returns the subpath from the key
@@ -63,7 +63,7 @@ func (k *STMKey) GetSubpath() byte {
 func newSTMKey(address common.Address, state common.Hash, subpath, keyType byte) STMKey {
 	var key STMKey
 	copy(key[:common.AddressLength], address.Bytes())
-	copy(key[common.AddressLength:KeyLength-1], state.Bytes())
+	copy(key[common.AddressLength:KeyLength-2], state.Bytes())
 	key[KeyLength-2] = subpath
 	key[KeyLength-1] = keyType
 

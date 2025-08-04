@@ -109,20 +109,22 @@ type ExecutionTask struct {
 // it is called by the parallel executor
 func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (err error) {
 	now := time.Now()
-	log.Info("[PARALLEL PROCESSOR] Executing transaction", "tx", task.tx.Hash().Hex())
 
 	// copy the clean statedb to the statedb
-	task.statedb = task.finalStatedb.Copy()
+	task.statedb = task.cleanStatedb.Copy()
 	task.statedb.SetTxContext(task.tx.Hash(), task.index)
 	task.statedb.SetMVHashMap(mvh)
 	task.statedb.SetIncarnation(incarnation)
+
+	log.Info("[PARALLEL PROCESSOR] Executing transaction", "tx", task.tx.Hash().Hex())
 
 	// create new context to be used in the EVM environment
 	txContext := NewEVMTxContext(&task.msg)
 
 	// create new evm instance
 	evm := vm.NewEVM(task.blockContext, txContext, task.statedb, task.config, task.evmConfig)
-	evm.Reset(txContext, task.statedb)
+
+	fmt.Printf("[PARALLEL PROCESSOR] [%d] Before execution: %v\n", task.index, task.statedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)))
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -146,7 +148,6 @@ func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (er
 	task.statedb.Finalise(task.config.IsEIP158(task.blockNumber))
 
 	log.Info("[PARALLEL PROCESSOR] Transaction executed", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
-
 	return
 }
 
@@ -189,15 +190,7 @@ func (task *ExecutionTask) Settle() {
 		fmt.Printf("Writes [%d]: To: %v, StateKey: %v\n", idx, write.Path.GetAddress(), write.Path.GetStateKey().Big())
 	}
 
-	beforeRoot := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber))
-	fmt.Printf("SETTLE[%d]: State root before write set: %x\n", task.index, beforeRoot)
-
 	task.finalStatedb.ApplyMVWriteSet(writeSet)
-
-	afterRoot := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber))
-	fmt.Printf("SETTLE[%d]: State root after write set: %x\n", task.index, afterRoot)
-
-	fmt.Printf("PARALLEL: Final state root after tx %d: %x\n", task.index, afterRoot)
 
 	// add logs
 	for _, l := range task.statedb.GetLogs(task.tx.Hash(), task.blockNumber.Uint64(), task.blockHash) {
@@ -215,16 +208,16 @@ func (task *ExecutionTask) Settle() {
 	// update the state with pending changes
 	var root []byte
 	if task.config.IsByzantium(task.blockNumber) {
-		task.statedb.Finalise(true)
+		task.finalStatedb.Finalise(true)
 	} else {
-		root = task.statedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
+		root = task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber)).Bytes()
 	}
 
 	*task.totalUsedGas += task.result.UsedGas
 
 	// Create a new receipt for the transaction, storing the intermediate root and gas used
 	// by the tx.
-	receipt := &types.Receipt{Type: task.tx.Type(), PostState: root, CumulativeGasUsed: task.result.UsedGas}
+	receipt := &types.Receipt{Type: task.tx.Type(), PostState: root, CumulativeGasUsed: *task.totalUsedGas}
 	if task.result.Failed() {
 		receipt.Status = types.ReceiptStatusFailed
 	} else {
@@ -250,8 +243,6 @@ func (task *ExecutionTask) Settle() {
 	receipt.BlockNumber = task.blockNumber
 	receipt.TransactionIndex = uint(task.finalStatedb.TxIndex())
 
-	fmt.Printf("[PARALLEL PROCESSOR] receipt.PostState: %v\n", receipt.PostState)
-
 	// Debug: Print receipt details
 	fmt.Printf("PARALLEL RECEIPT[%d]: TxHash=%v, GasUsed=%v, CumulativeGasUsed=%v, Status=%v\n",
 		task.index, receipt.TxHash.Hex(), receipt.GasUsed, receipt.CumulativeGasUsed, receipt.Status)
@@ -262,6 +253,8 @@ func (task *ExecutionTask) Settle() {
 	task.receiptsMu.Unlock()
 
 	fmt.Println("[PARALLEL PROCESSOR] Transaction settled", "tx", task.tx.Hash().Hex(), "duration", time.Since(now))
+	// latestRoot := task.finalStatedb.IntermediateRoot(task.config.IsEIP158(task.blockNumber))
+	// fmt.Printf("SETTLE [task %d] latestRoot: %v\n", task.index, latestRoot)
 }
 
 func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Header, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
@@ -315,9 +308,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 
-		// also skip the account checks
-		msg.SkipAccountChecks = true
-
 		// get clean statedb
 		cleanState := statedb.Copy()
 
@@ -358,22 +348,21 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 	start := time.Now()
 
 	// TODO: configure the number of processors
-	_, err = blockstm.ExecuteParallel(tasks, 5, nil)
+	_, err = blockstm.ExecuteParallel(tasks, 3, nil)
 	if err != nil {
 		return nil, nil, 0, err
 	}
+
+	// statedb.Finalise(p.config.IsEIP158(block.Number()))
+
+	// Debug: Print final state root
+	// finalRoot := statedb.IntermediateRoot(p.config.IsEIP158(block.Number()))
+	// fmt.Printf("PARALLEL FINAL ROOT: %v\n", finalRoot)
 
 	// Sort receipts by transaction index
 	sort.Slice(receipts, func(i, j int) bool {
 		return receipts[i].TransactionIndex < receipts[j].TransactionIndex
 	})
-
-	for _, receipt := range receipts {
-		fmt.Println("--------------------------------")
-		fmt.Printf("tx.Hash(): %v\n", receipt.TxHash)
-		fmt.Printf("receipt.PostState: %v\n", receipt.PostState)
-		fmt.Println("--------------------------------")
-	}
 
 	log.Info("Parallel execution", "tasks", len(tasks))
 
@@ -384,18 +373,18 @@ func (p *ParallelStateProcessor) Process(block *types.Block, parent *types.Heade
 		"avg_time_per_tx", duration/time.Duration(len(tasks)),
 		"receipts", len(receipts))
 
-	// Finalize the state after all transactions have been applied
-
-	// Finalize the state after all transactions have been applied
-	statedb.Finalise(p.config.IsEIP158(block.Number()))
+	// latestRoot := statedb.IntermediateRoot(p.config.IsEIP158(block.Number()))
+	// fmt.Printf("FINAL ROOT: %v\n", latestRoot)
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	if err = p.engine.Finalize(p.bc, block, parent, statedb, receipts); err != nil {
 		return nil, nil, 0, fmt.Errorf("engine finalization check failed: %w", err)
 	}
 
-	fmt.Println("[PARALLEL PROCESSOR] Block processed", "block", block.Hash().Hex(), "duration", time.Since(now))
+	// latestRoot = statedb.IntermediateRoot(p.config.IsEIP158(block.Number()))
+	// fmt.Printf("FINAL ROOT: %v\n", latestRoot)
 
+	fmt.Println("[PARALLEL PROCESSOR] Block processed", "block", block.Hash().Hex(), "duration", time.Since(now))
 	return receipts, allLogs, *usedGas, nil
 }
 

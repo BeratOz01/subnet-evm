@@ -102,43 +102,14 @@ func (p *StateProcessor) Process(block *types.Block, parent *types.Header, state
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 		statedb.SetTxContext(tx.Hash(), i)
-		initialRoot := statedb.IntermediateRoot(p.config.IsEIP158(blockNumber))
 		receipt, err := applyTransaction(msg, p.config, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
-
-		// Debug: Print receipt details
-		fmt.Printf("SEQUENTIAL RECEIPT[%d]: TxHash=%v, GasUsed=%v, CumulativeGasUsed=%v, Status=%v\n",
-			i, receipt.TxHash.Hex(), receipt.GasUsed, receipt.CumulativeGasUsed, receipt.Status)
-
-		finalRoot := statedb.IntermediateRoot(p.config.IsEIP158(blockNumber))
-		fmt.Println("--------------------------------")
-		fmt.Printf("tx.Hash(): %v\n", tx.Hash())
-		fmt.Println("initial root", initialRoot)
-		fmt.Println("final root", finalRoot)
-		fmt.Println("--------------------------------")
-
-		// Debug: Print state changes
-		fmt.Printf("SEQUENTIAL: Final state root after tx %d: %x\n", i, finalRoot)
-
-		fmt.Printf("DEBUG: Sequential transaction details - from: %v, to: %v, value: %v\n", msg.From, msg.To, msg.Value)
-	}
-	for _, receipt := range receipts {
-		fmt.Println("--------------------------------")
-		fmt.Printf("tx.Hash(): %v\n", receipt.TxHash)
-		fmt.Printf("receipt.PostState: %v\n", receipt.PostState)
-		fmt.Println("--------------------------------")
 	}
 
-	fmt.Println("SEQUENTIAL: MVFullWriteList")
-
-	for idx, write := range statedb.MVFullWriteList() {
-		fmt.Printf("Writes [%d]: To: %v, StateKey: %v\n", idx, write.Path.GetAddress(), write.Path.GetStateKey().Big())
-	}
-	fmt.Println("--------------------------------")
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	if err := p.engine.Finalize(p.bc, block, parent, statedb, receipts); err != nil {
 		return nil, nil, 0, fmt.Errorf("engine finalization check failed: %w", err)

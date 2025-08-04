@@ -198,7 +198,7 @@ func (pe *ParallelExecutor) Prepare() error {
 	senderTransactions := make(map[common.Address]int)
 
 	for idx, task := range pe.tasks {
-		hadAnyDependencies := false
+		clearPendingFlag := false
 
 		// set false by default for all tasks
 		pe.skipCheck[idx] = false
@@ -208,28 +208,26 @@ func (pe *ParallelExecutor) Prepare() error {
 		if len(task.Dependencies()) > 0 {
 			// for each dependency, add it to the dependency list
 			for _, dep := range task.Dependencies() {
-				hadAnyDependencies = true // mark that the task has dependencies
+				clearPendingFlag = true
 				pe.execTasks.addDependency(dep, idx)
 			}
 
 			// if there is at least one dependency, need to remove the task from the pending list
 			// since tx is not executable until all dependencies are resolved
-			if hadAnyDependencies {
+			if clearPendingFlag {
 				pe.execTasks.clearPending(idx)
+				clearPendingFlag = false
 			}
-
-			continue
+		} else {
+			// if there is no dependencies
+			// need to check that there is no other transaction with the same sender (because of nonce)
+			if tx, ok := senderTransactions[task.Sender()]; ok {
+				pe.execTasks.addDependency(tx, idx) // add dependency
+				pe.execTasks.clearPending(idx)      // removes tx from pending list
+			}
+			// mark that the task has been added to the senderTransactions map
+			senderTransactions[task.Sender()] = idx
 		}
-
-		// if there is no dependencies
-		// need to check that there is no other transaction with the same sender (because of nonce)
-		if tx, ok := senderTransactions[task.Sender()]; ok {
-			pe.execTasks.addDependency(tx, idx) // add dependency
-			pe.execTasks.clearPending(idx)      // removes tx from pending list
-		}
-
-		// mark that the task has been added to the senderTransactions map
-		senderTransactions[task.Sender()] = idx
 	}
 
 	// we are adding +1 for coordinator and numSpeculativeProcs for workers
@@ -242,13 +240,19 @@ func (pe *ParallelExecutor) Prepare() error {
 
 			// function that executes a task
 			doWork := func(task ExecutionVersionView) {
+				fmt.Printf("[WORKER %d] Starting execution of Task %d (sender=%s, hash=%s)\n",
+					workerID, task.version.TransactionIndex, task.sender.Hex(), task.task.Hash().Hex())
+
 				startTime := time.Since(pe.begin)
 
 				// execute the task
 				result := task.Execute()
 				// if task is successfully executed, flush the results into mvh
 				if result.err == nil {
+					fmt.Printf("[WORKER %d] Task %d completed successfully\n", workerID, task.version.TransactionIndex)
 					pe.mvh.FlushMVWriteSet(result.txAllOut)
+				} else {
+					fmt.Printf("[WORKER %d] Task %d failed with error: %v\n", workerID, task.version.TransactionIndex, result.err)
 				}
 
 				// push to the result queue
@@ -290,6 +294,7 @@ func (pe *ParallelExecutor) Prepare() error {
 	go func() {
 		for t := range pe.chSettle {
 			pe.tasks[t].Settle()
+			fmt.Printf("DEBUG: Task %d settled\n", t)
 		}
 
 		pe.settleWg.Done()
